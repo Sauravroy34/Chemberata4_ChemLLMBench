@@ -1,0 +1,20 @@
+pandas
+numpy
+rdkit
+requests
+
+# LLM Frameworks, API & Observability
+litellm
+langfuse
+python-dotenv
+tqdm
+
+# Evaluation & Metrics
+scikit-learn
+evaluate
+Levenshtein
+rouge-score    
+nltk
+fcd
+transformers==4.49.0           
+vllm           

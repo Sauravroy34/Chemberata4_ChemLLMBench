@@ -1,10 +1,34 @@
+BBBP_prompt = "You are an expert chemist, your task is to predict the property of molecule using your experienced chemical property prediction knowledge. \nPlease strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, the task focuses on predicting molecular properties, specifically penetration/non-penetration to the brain-blood barrier, based on the SMILES string representation of each molecule. You will be provided with several examples molecules, each accompanied by a binary label indicating whether it has penetrative property (Yes) or not (No). The task is to predict the binary label for a given molecule, please answer with only Yes or No.\n"
+
+
+BACE_prompt = "You are an expert chemist, your task is to predict the property of molecule using your experienced chemical property prediction knowledge.\nPlease strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, predict the molecular properties of a given chemical compound based on its structure, by analyzing wether it can inhibit(Yes) the Beta-site Amyloid Precursor Protein Cleaving Enzyme 1 (BACE1) or cannot inhibit(No) BACE1. Consider factors such as molecular weight, atom count, bond types, and functional groups in order to assess the compound's drug-likeness and its potential to serve as an effective therapeutic agent for Alzheimer's disease. You will be provided with task template, please answer with only Yes or No. \n"
+
+
+Tox21_prompt = "You are an expert chemist, your task is to predict the property of molecule using your experienced chemical property prediction knowledge.\n\
+Please strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, the task focuses on predicting molecular properties, specifically wether a molecule is toxic(Yes) or Not toxic(No), based on the SMILES string representation of each molecule. A template will be provided. The task is to predict the binary label for a given molecule SMILES, please answer with only Yes or No.\n"
+
+HIV_prompt = "You are an expert chemist, your task is to predict the property of molecule using your experienced chemical property prediction knowledge. Please strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, the task focuses on predicting molecular properties, specifically inhibit of HIV replication based on the SMILES string representation of each molecule. You will be provided with several examples molecules, each accompanied by a binary label indicating whether a molecule can inhibit (Yes) or cannot inhibit (No) HIV replication. Additionally, the activity test results of the molecules are provided. There are three classes of the activity test: 1). CA: confirmed active, 2). CM: Confirmed moderately active 3.) CI: Confirmed inactive. The task is to precisely predict the binary label for a given molecule and its HIV activity test, considering its properties and its potential to impede HIV replication.\n"
+
+ClinTox_prompt = "You are an expert chemist, your task is to predict the property of molecule using your experienced chemical property prediction knowledge.\n\
+Please strictly follow the format, no other information can be provided. Given the SMILES string of a molecule, the task focuses on predicting molecular properties, specifically wether a molecule is Clinically-trail-Toxic(Yes) or Not Clinically-trail-toxic (No) based on the SMILES string representation of each molecule.. The FDA-approved status will specify if the drug is approved by the FDA for clinical trials(Yes) or Not approved by the FDA for clinical trials(No). You will be provided with task template. The task is to predict the binary label for a given molecule, please answer with only Yes or No.\n"
+
+
+
+
+
+
+
+
+
+
+
+
 import random
 import pandas as pd
 from rdkit import Chem, DataStructs
 from rdkit.Chem import rdFingerprintGenerator
 from rdkit.Chem.Scaffolds import MurckoScaffold
 import numpy as np
-from .Prompts import BBBP_prompt , BACE_prompt , Tox21_prompt , HIV_prompt , ClinTox_prompt
 
 SEED = 42
 SAMPLE_SIZE  = 100
@@ -50,12 +74,10 @@ LABEL_COL_MAP = {
     "ClinTox": "CT_TOX",
 }
 
-# Tox21 assay columns used for aggregation
-TOX21_ASSAY_COLS = [
-    "NR-AR", "NR-AR-LV", "NR-AhR", "NR-Aromatase",
-    "NR-ER", "NR-ER-LV", "NR-PPAR-gamma",
-    "SR-ARE", "SR-ATAD5", "SR-HSE", "SR-MMP", "SR-p53",
-]
+# # Tox21 assay columns used for aggregation
+TOX21_ASSAY_COLS = ['NR-AR', 'NR-AR-LBD', 'NR-AhR', 'NR-Aromatase', 
+                    'NR-ER', 'NR-ER-LBD', 'NR-PPAR-gamma',
+                    'SR-ARE', 'SR-ATAD5', 'SR-HSE', 'SR-MMP', 'SR-p53']
 
 _fp_gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
 
@@ -203,3 +225,9 @@ def load_dataset(name, sample_strategy, k):
     )
 
     return system_prompts, user_prompts, df_test
+
+
+if __name__ == "__main__":
+    df  = pd.read_csv("tox21.csv")
+
+    print(list(df.columns))    

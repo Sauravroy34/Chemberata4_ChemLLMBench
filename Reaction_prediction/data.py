@@ -1,4 +1,5 @@
 import os
+import pickle
 from pathlib import Path
 import random
 import requests
@@ -26,18 +27,38 @@ random.seed(SEED)
 SHARED_NAME = "7eci3nd9vy0xplqniitpk02rbg9q2zcq"
 FILES = {"forward": "854847816719"}
 
+# the pickle holds *_mol columns; they are renamed first and converted to SMILES lazily
+
+
 MAPPING_COL_NAMES = {
-    "reactants": "reactants_smiles",
-    "products": "products_smiles",
+    "reactants_mol": "reactant",
+    "products_mol": "product",
 }
 
-INPUT_COL = "reactants_smiles"     # what the model is given
-TARGET_COL = "products_smiles"   # what the model must predict
+INPUT_COL = "reactant"     # what the model is given
+TARGET_COL = "product"   # what the model must predict
 
 
-INPUT_LABEL = "Reactants"
+INPUT_LABEL = "reactant"
 TARGET_LABEL = "Products"
 _fp_gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+
+
+# ----------------------------- bare-bytes unpickling -----------------------------
+class MolStub:
+    """Holds the raw RDKit binary instead of building a full Mol."""
+    def __init__(self, *args):
+        self.b = args[0] if args else None
+
+    def __setstate__(self, state):
+        pass  # ignore any extra state
+
+
+class StubUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module.startswith("rdkit") and name == "Mol":
+            return MolStub
+        return super().find_class(module, name)
 
 
 # ----------------------------- download / load -----------------------------
@@ -70,25 +91,30 @@ def download_box_file(file_id, out_path):
 
 
 def load_raw_dataset(name):
+    """Loads the DataFrame with MolStub objects (raw bytes) instead of real Mols."""
     path = download_box_file(FILES[name], f"{name}.pkl")
-    obj = pd.read_pickle(path)
+    with open(path, "rb") as f:
+        obj = StubUnpickler(f).load()
     return obj if isinstance(obj, pd.DataFrame) else pd.DataFrame(obj)
 
 
 # ----------------------------- preprocessing (in place) -----------------------------
 def _safe_smiles(m):
-    return Chem.MolToSmiles(m) if isinstance(m, Chem.Mol) else None
+    """MolStub (raw bytes) -> canonical SMILES. One real Mol alive at a time."""
+    try:
+        return Chem.MolToSmiles(Chem.Mol(m.b))
+    except Exception:
+        return None
 
 
-def convert_all_mols(df, mol_cols=("reactants_mol", "products_mol")):
-    """Mol -> canonical SMILES for all columns, then drop the Mol columns."""
-    for col in mol_cols:
-        df[col.removesuffix("_mol")] = df[col].map(_safe_smiles)
-    df.drop(columns=list(mol_cols), inplace=True)
+def convert_stub_cols(df, cols=(INPUT_COL, TARGET_COL)):
+    """Stub (raw bytes) -> canonical SMILES, in place, for the given df only."""
+    for col in cols:
+        df[col] = df[col].map(_safe_smiles)
 
 
 def drop_columns(df, cols):
-    df.drop(columns=list(cols), inplace=True)
+    df.drop(columns=list(cols), inplace=True, errors="ignore")
 
 
 def rename_columns(df, mapping):
@@ -96,7 +122,8 @@ def rename_columns(df, mapping):
 
 
 def filter_invalid_smiles(df, cols=(INPUT_COL, TARGET_COL)):
-    """Drop rows where any of the given SMILES columns is missing/invalid (in place)."""
+    """Drop rows where any of the given SMILES columns is missing/invalid (in place).
+    Call only after the columns have been converted to SMILES."""
     mask = np.ones(len(df), dtype=bool)
     for col in cols:
         mask &= np.fromiter(
@@ -117,25 +144,30 @@ def split_train_test(df, split_col="set", train_label="train", test_label="test"
 
 
 def load_or_sample_test_set(test_df, csv_path=TEST_SET_CSV, n=SAMPLE_SIZE, seed=SEED):
-    """Use the original test-set CSV if present, otherwise sample n rows (not saved)."""
+    """Use the original test-set CSV if present, otherwise sample n rows (not saved).
+    Sampling happens first; only the sampled rows are converted to SMILES."""
     if os.path.exists(csv_path):
         print(f"Using existing test set: {csv_path}")
-        return pd.read_csv(csv_path)
+        return pd.read_csv(csv_path)          # already SMILES
 
     n = min(n, len(test_df))
     print(f"No test set CSV found, sampling {n} rows randomly (seed={seed})")
-    return test_df.sample(n=n, random_state=seed).reset_index(drop=True)
+    df_test = test_df.sample(n=n, random_state=seed).reset_index(drop=True)
+    convert_stub_cols(df_test)                # only n rows converted
+    return df_test
 
 
 # ----------------------------- ICL example sampling -----------------------------
 def _format_examples(rows):
-    """List of (products_smiles, reactants_smiles) tuples."""
+    """List of (input_smiles, target_smiles) tuples."""
     return list(zip(rows[INPUT_COL], rows[TARGET_COL]))
 
 
 def _random_sample_examples(df_train, k):
-    """k random examples, shared by every test molecule."""
-    return _format_examples(df_train.sample(k, random_state=SEED))
+    """k random examples, shared by every test molecule. Only these k rows are converted."""
+    rows = df_train.sample(k, random_state=SEED).copy()
+    convert_stub_cols(rows)
+    return _format_examples(rows)
 
 
 def _scaffold_fingerprint(smiles):
@@ -145,7 +177,7 @@ def _scaffold_fingerprint(smiles):
 
 
 def _scaffold_sample_examples(df_train, train_fps, test_smiles, k):
-    """k train examples whose product scaffolds are most similar to the test product."""
+    """k train examples whose scaffolds are most similar to the test molecule."""
     test_fp = _scaffold_fingerprint(test_smiles)
     sims = np.asarray(DataStructs.BulkTanimotoSimilarity(test_fp, train_fps))
     top_k = np.argsort(sims)[::-1][:k]
@@ -169,17 +201,18 @@ def _create_prompt(sample_strategy, df_train, df_test, k):
     test_smiles = df_test[INPUT_COL].tolist()
     user_prompts = [f"{INPUT_LABEL}: {s}\n{TARGET_LABEL}:" for s in test_smiles]
 
-    # zero-shot
+    # zero-shot: train_df is never touched, nothing converted
     if k == 0:
         return [_build_system_prompt(None)] * len(test_smiles), user_prompts
 
-    # random: one shared system prompt
+    # random: sample first, convert just k rows
     if sample_strategy == "random":
         system_prompt = _build_system_prompt(_random_sample_examples(df_train, k))
         return [system_prompt] * len(test_smiles), user_prompts
 
-    # scaffold: a different system prompt per test molecule
+    # scaffold: needs every train molecule, so convert the whole train set here
     if sample_strategy == "scaffold":
+        convert_stub_cols(df_train)           # the only place the full train set is converted
         train_fps = [_scaffold_fingerprint(s) for s in df_train[INPUT_COL]]  # computed once
         system_prompts = [
             _build_system_prompt(_scaffold_sample_examples(df_train, train_fps, s, k))
@@ -194,17 +227,22 @@ def _create_prompt(sample_strategy, df_train, df_test, k):
 def load_forward_dataset(sample_strategy="random", k=5, name="forward"):
     """Returns (system_prompts, user_prompts, df_test)."""
 
-    df = load_raw_dataset(name)
+    df = load_raw_dataset(name)               # stubs, cheap
+    print("this is done")
     drop_columns(df, ["reaction_type"])
-    convert_all_mols(df)
     rename_columns(df, MAPPING_COL_NAMES)
-    filter_invalid_smiles(df)
-
     train_df, test_df = split_train_test(df)
     df_test = load_or_sample_test_set(test_df)
-
     system_prompts, user_prompts = _create_prompt(
         sample_strategy=sample_strategy, df_train=train_df, df_test=df_test, k=k
     )
     return system_prompts, user_prompts, df_test
 
+
+
+if __name__ == "__main__":
+
+    sys_p, usr_p, df = load_forward_dataset(k=0)
+
+    print(sys_p[0])
+    print(usr_p[0])
