@@ -6,6 +6,7 @@ import datetime
 import pandas as pd
 from tqdm import tqdm
 from rdkit import Chem, RDLogger
+from pathlib import Path
 
 from utils import LiteLLMModel, HuggingFaceModel
 from .data import load_dataset, TASK_MAP as CSV_MAP   # task -> csv filename
@@ -21,35 +22,60 @@ LABEL_MAP = {
     "Solvent_selection": "Optimal solvent",
 }
 
+# Any component label a model might prefix its answer with
+_COMPONENT = r"(?:reactant|reagent|ligand|solvent|base)s?"
+
 
 # ── Parsing ─────────────────────────────────────────────────────────────────
 def _clean(text):
-    """Strip markdown fences, quotes and backticks."""
+    """Strip markdown fences, bold markers, quotes and backticks."""
     text = re.sub(r"```[a-zA-Z]*", "", text)
+    text = text.replace("**", "")
     return text.strip().strip("`'\" \n")
 
 
 def _strip_token(tok):
-    return tok.strip("`'\",;")
+    """Trim wrapping quotes/backticks and trailing punctuation from a token."""
+    tok = tok.strip("`'\",;")
+    # a SMILES never ends with '.', so a trailing period is sentence punctuation
+    return tok.rstrip(".").strip("`'\",;")
 
 
 def _parse_prediction(raw_text, task):
+    """Extract the predicted SMILES string from the model's raw output.
+
+    Handles, e.g.:
+        "Optimal reactant: Brc1ccc2ncccc2c1"
+        "Reactant: Brc1ccc2ncccc2c1"        (label differs from the template)
+        "Reactant:Brc1ccc2ncccc2c1"         (no space after the colon)
+        "The optimal solvent is: CO."       (sentence form)
+        "Brc1ccc2ncccc2c1"                  (no label at all)
+        "Reactant: X\\nExplanation ..."      (extra text after the answer)
+    """
     if not raw_text:
         return ""
-    text = _clean(raw_text)
+    text = _clean(str(raw_text))
+    if not text:
+        return ""
 
-    # Preferred: task-specific label, e.g. "Optimal solvent: CO"
+    # 1) Task-specific label, e.g. "Optimal solvent: CO"
     label = re.escape(LABEL_MAP[task].strip())
-    match = re.search(rf"{label}s?\s*:\s*(\S+)", text, re.IGNORECASE)
-    if match:
-        return _strip_token(match.group(1))
+    m = re.search(rf"{label}s?\s*(?:is\s*)?[:=]\s*(\S+)", text, re.IGNORECASE)
+    if m:
+        return _strip_token(m.group(1))
 
-    # Generic: "Optimal <anything>: X"
-    match = re.search(r"optimal\s+\w+\s*:\s*(\S+)", text, re.IGNORECASE)
-    if match:
-        return _strip_token(match.group(1))
+    # 2) Generic "Optimal <anything>: X"
+    m = re.search(r"optimal\s+\w+\s*(?:is\s*)?[:=]\s*(\S+)", text, re.IGNORECASE)
+    if m:
+        return _strip_token(m.group(1))
 
-    # Fallback: first token of first non-empty line
+    # 3) Any component label at the start of a line: "Reactant: X", "Solvent:X"
+    m = re.search(rf"^\s*{_COMPONENT}\s*(?:is\s*)?[:=]\s*(\S+)",
+                  text, re.IGNORECASE | re.MULTILINE)
+    if m:
+        return _strip_token(m.group(1))
+
+    # 4) No label: first token of the first non-empty line
     for line in text.splitlines():
         line = line.strip()
         if line:
@@ -111,7 +137,8 @@ def _build_model(backend, model_name, temperature, max_new_tokens=256):
 
 # ── Benchmark ───────────────────────────────────────────────────────────────
 def run_task(task, model, model_name, data_dir):
-    csv_path = os.path.join(data_dir, CSV_MAP[task])
+
+    csv_path = str(Path(__file__).parent/CSV_MAP[task])
     print(f"[*] Loading {task} from {csv_path}")
     system_prompts, user_prompts, df = load_dataset(csv_path)
     df = df.reset_index(drop=True)

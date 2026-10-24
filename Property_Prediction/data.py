@@ -126,6 +126,11 @@ def _random_sample_examples(df, k, name):
     label_col = LABEL_COL_MAP[name]
     positive_examples = df[df[label_col] == 1].sample(int(k/2))
     negative_examples = df[df[label_col] == 0].sample(int(k/2))
+
+    if name.lower() == "hiv":
+        positive_examples = df[df[label_col] == 1].sample(int(0.2*k))
+        negative_examples = df[df[label_col] == 0].sample(int(0.8*k))
+
     return _format_examples(pd.concat([positive_examples, negative_examples]), name)
 
 
@@ -228,6 +233,8 @@ def load_dataset(name, sample_strategy, k):
 
 
 if __name__ == "__main__":
-    df  = pd.read_csv("tox21.csv")
+    sys_p, usr_p, df = load_dataset("HIV",sample_strategy="random",k=10)
 
-    print(list(df.columns))    
+
+    print(sys_p[0])
+    print(usr_p[0])
