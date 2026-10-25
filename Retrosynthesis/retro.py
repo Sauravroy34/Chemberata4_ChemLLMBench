@@ -156,6 +156,11 @@ def run_benchmark(
         raw_outputs.append(raw_text)
         predictions.append(_parse_prediction(raw_text))
 
+    if type(model) is LiteLLMModel:
+        print(f"[✓] Total API cost: ${model.cost:.4f}")
+
+        model.cost = 0.0  # Reset cost for next run
+
     # 4. Evaluate + print
     print("[*] Computing metrics …")
     metrics = _compute_metrics(y_true, predictions)

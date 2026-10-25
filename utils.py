@@ -7,10 +7,12 @@ from vllm import LLM, SamplingParams
 from dotenv import load_dotenv
 from langfuse import get_client, propagate_attributes
 import litellm
+from litellm import completion_cost
 
 load_dotenv(override=True)
 litellm.drop_params = True
 
+litellm.completion_cost = completion_cost
 
 if os.environ.get('LANGFUSE_PUBLIC_KEY') and os.environ.get('LANGFUSE_SECRET_KEY'):
     LANGFUSE = get_client()
@@ -31,6 +33,7 @@ class LiteLLMModel(ModelInterface):
         self.model_name = model_name
         self.max_new_tokens = max_new_tokens
         self.max_retries = max_retries
+        self.cost = 0.0
         self.kwargs = kwargs
 
     def _generate_parameters(self,sys_prompt,user_prompt):
@@ -43,7 +46,7 @@ class LiteLLMModel(ModelInterface):
             "model": self.model_name,
             "messages": messages,
             "temperature": self.kwargs.get("temperature", 0.0),
-            "max_tokens":  self.max_new_tokens,
+            # "max_tokens":  self.max_new_tokens,
         }
 
         return params
@@ -61,6 +64,8 @@ class LiteLLMModel(ModelInterface):
                     litellm.failure_callback = ["langfuse"] if LANGFUSE else []
                     
                     response = litellm.completion(**params)
+                    
+                    self.cost += float(response.cost)
                     text = response.choices[0].message.content.strip()
                     break
                 except Exception as e:
