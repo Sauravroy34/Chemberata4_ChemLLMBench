@@ -36,6 +36,17 @@ def _parse_prediction(raw_text, task_name):
         return ""
 
     text = raw_text.strip()
+    try:
+        json_match = re.search(r"\{.*\}", text, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            if "answer" in data:
+                ans = str(data["answer"]).strip()
+                if task_name == "MOL_DESIGN":
+                    return ans.split()[0] if ans else ""
+                return ans
+    except Exception:
+        pass
     _, tgt_col = TASK_COL_MAP[task_name]
     match = None
 

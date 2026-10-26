@@ -58,6 +58,17 @@ def _parse_prediction(raw_text, task):
     if not text:
         return ""
 
+    try:
+        json_match = re.search(r"\{.*\}", text, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            if "answer" in data:
+                ans = _strip_token(str(data["answer"]))
+                if ans:
+                    return ans
+    except Exception:
+        pass
+
     # 1) Task-specific label, e.g. "Optimal solvent: CO"
     label = re.escape(LABEL_MAP[task].strip())
     m = re.search(rf"{label}s?\s*(?:is\s*)?[:=]\s*(\S+)", text, re.IGNORECASE)

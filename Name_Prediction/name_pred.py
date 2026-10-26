@@ -50,9 +50,8 @@ _FORMULA_TOKEN = re.compile(r"([A-Z][a-z]?)(\d*)")
 def _parse_prediction(raw_text, task_name):
     """Extract the predicted value from the raw LLM response.
 
-    The model is prompted to reply in the format ``<col>: <value>``.
-    This function tries to extract ``<value>`` from that pattern,
-    falling back to the first non-empty line if no pattern is found.
+    The model is prompted to reply in JSON format {"answer": "<value>"}.
+    Falls back to `<col>: <value>` or the first non-empty line.
 
     Returns an empty string on parse failure.
     """
@@ -60,6 +59,15 @@ def _parse_prediction(raw_text, task_name):
         return ""
 
     text = raw_text.strip()
+    try:
+        json_match = re.search(r"\{.*\}", text, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            if "answer" in data:
+                return str(data["answer"]).strip()
+    except Exception:
+        pass
+
     _, to_col = TASK_COL_MAP[task_name]
 
     # Try structured pattern  "<to_col>: <answer>"

@@ -13,7 +13,7 @@ from rdkit.Chem.Scaffolds import MurckoScaffold
 
 RETRO_PROMPT = """
 You are an expert chemist. Given the product SMILES, your task is to predict the reactants SMILES using your experienced chemical Retrosynthesis knowledge. 
-Please strictly follow the format, no other information can be provided. You should only reply with SMILES string notations to represent the reactants. The output contains the reactants and reagents which are split by '.'. The reactants smiles must be valid and chemically reasonable. 
+Please strictly follow the format, no other information can be provided. You should only reply with SMILES string notations to represent the reactants. The output contains the reactants and reagents which are split by '.'. The reactants smiles must be valid and chemically reasonable. Wrap your response in JSON: {"answer": "<your answer>"}.
 """
 
 # ----------------------------- config -----------------------------

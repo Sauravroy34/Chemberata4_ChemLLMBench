@@ -31,6 +31,16 @@ def _parse_prediction(raw_text):
     if not raw_text:
         return ""
     text = _clean(raw_text)
+    try:
+        json_match = re.search(r"\{.*\}", text, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            if "answer" in data:
+                ans = str(data["answer"]).strip("`'\" \t\n")
+                if ans:
+                    return ans.split()[0]
+    except Exception:
+        pass
 
     # Preferred: text after the target label, e.g. "Products: CC(=O)OCC".
     # Tolerates "Product:" as well as "Products:".

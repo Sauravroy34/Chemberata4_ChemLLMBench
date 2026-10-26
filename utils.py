@@ -38,7 +38,7 @@ class LiteLLMModel(ModelInterface):
 
     def _generate_parameters(self,sys_prompt,user_prompt):
         messages = [
-            {"role": "system", "content": sys_prompt},
+            {"role": "system", "content": [{"type": "text", "text": sys_prompt, "cache_control": {"type": "ephemeral"}}]},
             {"role": "user",   "content": user_prompt},
         ]
 

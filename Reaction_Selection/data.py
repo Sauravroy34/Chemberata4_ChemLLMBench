@@ -23,7 +23,7 @@ def _load_prompts(df):
 
         system_prompt, user_prompt = task.split(split_marker, 1)
 
-        system_prompts.append(system_prompt.strip())
+        system_prompts.append(system_prompt.strip() + " Wrap your response in JSON: {\"answer\": \"<your answer>\"}.")
 
         # Add the marker back because it is part of the actual task
         user_prompts.append(

@@ -50,6 +50,20 @@ def _parse_prediction(raw_text, dataset_name):
     if not raw_text:
         return -1
 
+    text = raw_text.strip()
+    try:
+        json_match = re.search(r"\{.*\}", text, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            if "answer" in data:
+                ans = str(data["answer"]).strip().lower()
+                if "yes" in ans:
+                    return 1
+                elif "no" in ans:
+                    return 0
+    except Exception:
+        pass
+
     task_key = TASK_DESCRIPTION[dataset_name]
     text = raw_text.strip()
 

@@ -17,7 +17,7 @@ Please strictly follow the format, no other information can be provided. Given t
 the task focuses on predicting reaction yield, specifically wether a reaction is High-yielding(Yes) or Not High-yielding(No),based on the SMILES string representation of each Buchwald-Hartwig reaction. 
 The reactants are separated by '.' and product are separated by '>>'. High-yielding reaction means the yield rate of the reaction is above 70. 
 In comparison to the traditional Buchwald-Hartwig reaction, this study involved the addition of additives and aimed to evaluate the effects of isoxazole agment additives as Glorius fragment additives on the amination of various aryl and heteroaryl halides. 
-You will be provided with several examples molecules. Please answer with only Yes or No.
+You will be provided with several examples molecules. Please answer with only Yes or No. Wrap your response in JSON: {"answer": "<Yes/No>"}.
 """
 
 SUZUKI_PROMPT = """
@@ -25,7 +25,7 @@ You are an expert chemist, your task is to predict the yield of reaction using y
 Please strictly follow the format, no other information can be provided. Given the SMILES string of a Suzuki-Miyaura reaction, 
 the task focuses on predicting reaction yield, specifically wether a reaction is High-yielding(Yes) or Not High-yielding(No),based on the SMILES string representation of each Suzuki-Miyaura reaction. 
 The reactants are separated by '.' and product are separated by '>>'. High-yielding reaction means the yield rate of the reaction is above 70. 
-You will be provided with several examples molecules. Please answer with only Yes or No.
+You will be provided with several examples molecules. Please answer with only Yes or No. Wrap your response in JSON: {"answer": "<Yes/No>"}.
 """
 
 # Local file paths (assumes the files are in the same folder as this script)
@@ -182,13 +182,25 @@ def load_function(name, sample_strategy="random", k=0):
 
 
 def _parse_prediction(raw_text, dataset_name):
-    import re
+    import re, json
     """Extract the first Yes/No answer relevant to the target task.
     Returns 1 (Yes), 0 (No), or -1 (parse failure)."""
     if not raw_text:
         return -1
 
     text = raw_text.strip()
+    try:
+        json_match = re.search(r"\{.*\}", text, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            if "answer" in data:
+                ans = str(data["answer"]).strip().lower()
+                if "yes" in ans:
+                    return 1
+                elif "no" in ans:
+                    return 0
+    except Exception:
+        pass
 
     # Try to find "<TaskKey>: Yes/No" pattern first
     pattern = re.compile(
