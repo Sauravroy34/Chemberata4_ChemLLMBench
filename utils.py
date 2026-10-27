@@ -65,7 +65,7 @@ class LiteLLMModel(ModelInterface):
                     
                     response = litellm.completion(**params)
                     
-                    self.cost += float(response.cost)
+                    self.cost += float(response._hidden_params.get('response_cost', 0))
                     text = response.choices[0].message.content.strip()
                     break
                 except Exception as e:
