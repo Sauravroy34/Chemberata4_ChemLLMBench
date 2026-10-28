@@ -84,10 +84,11 @@ def _fp_similarities(mol_a, mol_b):
 def _compute_fcd(valid_pred_smiles, true_smiles):
     """FCD between valid predictions and ground truth. NaN if unavailable."""
     try:
-        from fcd import get_fcd
+        from fcd import get_fcd , load_ref_model
+        model = load_ref_model()
         if len(valid_pred_smiles) < 2 or len(true_smiles) < 2:
             return float("nan")
-        return float(get_fcd(valid_pred_smiles, true_smiles))
+        return float(get_fcd(valid_pred_smiles, true_smiles,model))
     except Exception as e:
         print(f"[!] FCD could not be computed: {e}")
         return float("nan")

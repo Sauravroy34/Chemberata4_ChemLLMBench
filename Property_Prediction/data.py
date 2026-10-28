@@ -90,6 +90,10 @@ def _preprocess(df, name):
     return df
 
 
+def _rename_mol_column(df):
+    """Renames the 'mol' column to 'smiles' in a pandas DataFrame."""
+    return df.rename(columns={"mol": "smiles"})
+
 def _filter_smiles(df):
     """Drop rows with invalid SMILES in place and return the same df."""
     mask = np.fromiter(
@@ -217,6 +221,11 @@ def _create_prompt(sample_strategy, df_train, df_test, name, k):
 
 def load_dataset(name, sample_strategy, k):
     df = pd.read_csv(DATASETS[name])
+
+
+    if name.lower() == "bace":
+        df = _rename_mol_column(df)
+
     _preprocess(df, name)
     _filter_smiles(df)
 
