@@ -463,18 +463,3 @@ When `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are provided in your `.env`
 If keys are omitted, ChemLLMBench automatically operates in offline mode without logging.
 
 ---
-
-## Citation & Acknowledgments
-
-If you use ChemLLMBench or any of its evaluation routines in your research, please consider citing:
-
-```bibtex
-@misc{chemllmbench2026,
-  title={ChemLLMBench: A Comprehensive Large Language Model Benchmark Suite for Chemistry},
-  author={ChemLLMBench Contributors},
-  year={2026},
-  url={https://github.com/your-username/ChemLLMBench}
-}
-```
-
-Special thanks to the open-source chemistry and ML communities, including [RDKit](https://www.rdkit.org/), [DeepChem](https://deepchem.io/), [vLLM](https://github.com/vllm-project/vllm), [LiteLLM](https://github.com/BerriAI/litellm), and [MolT5](https://github.com/blender-nlp/MolT5).
