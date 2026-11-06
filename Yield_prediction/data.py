@@ -61,26 +61,40 @@ TASK_MAP = {
 
 def _extract_npz_to_df(file_path, split):
     if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Could not find '{file_path}'. Please make sure you downloaded it to the same directory as this script.")
-        
+        raise FileNotFoundError(
+            f"Could not find '{file_path}'. Please make sure you downloaded it "
+            f"to the same directory as this script."
+        )
+
     npz = np.load(file_path, allow_pickle=True)
 
-    if split == "train":
-        data = npz['data'][2]
-        df = pd.DataFrame(data)
-        df.rename(columns={"yld": "yeild", "rsmi": "reaction"}, inplace=True)
-        cols = list(df.columns)
-        cols[0], cols[1] = cols[1], cols[0]
-        df = df[cols]
-        df['yeild'] = np.where(df['yeild'] > 70, 'Yes', 'No')
-        return df
-    else:
-        data = npz['data_df']
+    # ── Build a raw (reaction, yield) DataFrame depending on file layout ──
+    if "data" in npz.files:
+        # Buchwald-Hartwig train layout: data[2] = {"yld": [...], "rsmi": [...]}
+        raw = npz["data"][2]
         df = pd.DataFrame({
-            "reaction": data[:, 0],
-            "yeild": data[:, 1]
+            "reaction": list(raw["rsmi"]),
+            "yeild": np.asarray(raw["yld"], dtype=float),
         })
-        return df
+    elif "data_df" in npz.files:
+        # Suzuki train + all test files: (N, 2) object array [reaction, yield]
+        arr = npz["data_df"]
+        df = pd.DataFrame({
+            "reaction": arr[:, 0],
+            "yeild": arr[:, 1],
+        })
+    else:
+        raise KeyError(
+            f"Unrecognised layout in '{file_path}'. Keys found: {npz.files}"
+        )
+
+    # ── Binarise numeric yields (> 70 -> Yes, else No) ───────────────────
+    # Test files already contain 'Yes'/'No' strings, so they are left as-is.
+    if not df["yeild"].isin(["Yes", "No"]).all():
+        yld = pd.to_numeric(df["yeild"], errors="raise")
+        df["yeild"] = np.where(yld > 70, "Yes", "No")
+
+    return df.reset_index(drop=True)
 
 # ---------------------------------------------------------------------------
 # Sampling strategies

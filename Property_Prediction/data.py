@@ -90,6 +90,26 @@ def _preprocess(df, name):
     return df
 
 
+def _sample_test(df, sample_size, name):
+    if sample_size > len(df):
+        raise ValueError(f"Requested sample size {sample_size} exceeds dataset size {len(df)} for {name}.")
+
+    if name.lower() in ["hiv","clintox"]:
+        pos_df = df[df[LABEL_COL_MAP[name]] == 1]
+        neg_df = df[df[LABEL_COL_MAP[name]] == 0]
+
+        pos_sample_size = int(sample_size * 0.2)
+        neg_sample_size = sample_size - pos_sample_size
+
+        if pos_sample_size > len(pos_df) or neg_sample_size > len(neg_df):
+            raise ValueError(f"Not enough positive or negative examples to sample {sample_size} for {name}.")
+
+        sampled_pos = pos_df.sample(pos_sample_size, random_state=SEED)
+        sampled_neg = neg_df.sample(neg_sample_size, random_state=SEED)
+
+        return pd.concat([sampled_pos, sampled_neg])
+    return df.sample(sample_size, random_state=SEED)
+
 def _rename_mol_column(df):
     """Renames the 'mol' column to 'smiles' in a pandas DataFrame."""
     return df.rename(columns={"mol": "smiles"})
@@ -229,7 +249,7 @@ def load_dataset(name, sample_strategy, k):
     _preprocess(df, name)
     _filter_smiles(df)
 
-    df_test = df.sample(SAMPLE_SIZE, random_state=SEED)
+    df_test = _sample_test(df, SAMPLE_SIZE, name)
 
     df.drop(df_test.index, inplace=True)
     df.reset_index(drop=True, inplace=True)   # so iloc/positions line up with train_fps
