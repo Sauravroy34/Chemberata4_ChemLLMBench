@@ -74,10 +74,7 @@ LABEL_COL_MAP = {
     "ClinTox": "CT_TOX",
 }
 
-# # Tox21 assay columns used for aggregation
-TOX21_ASSAY_COLS = ['NR-AR', 'NR-AR-LBD', 'NR-AhR', 'NR-Aromatase', 
-                    'NR-ER', 'NR-ER-LBD', 'NR-PPAR-gamma',
-                    'SR-ARE', 'SR-ATAD5', 'SR-HSE', 'SR-MMP', 'SR-p53']
+TOX21_ASSAY_COLS = ['SR-p53']
 
 _fp_gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
 
@@ -85,8 +82,7 @@ _fp_gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
 def _preprocess(df, name):
     """Dataset-specific preprocessing. Creates a unified label column where needed."""
     if name == "Tox21":
-        # If ANY assay flags toxic (1), the molecule is toxic
-        df["Toxic"] = (df[TOX21_ASSAY_COLS].fillna(0).max(axis=1) >= 1).astype(int)
+        df["Toxic"] = (df[TOX21_ASSAY_COLS].dropna().astype(int))
     return df
 
 
@@ -94,7 +90,7 @@ def _sample_test(df, sample_size, name):
     if sample_size > len(df):
         raise ValueError(f"Requested sample size {sample_size} exceeds dataset size {len(df)} for {name}.")
 
-    if name.lower() in ["hiv","clintox"]:
+    if name.lower() in ["hiv","clintox","tox21"]:
         pos_df = df[df[LABEL_COL_MAP[name]] == 1]
         neg_df = df[df[LABEL_COL_MAP[name]] == 0]
 
