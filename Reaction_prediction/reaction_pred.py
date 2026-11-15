@@ -5,9 +5,11 @@ import argparse
 import datetime
 import pandas as pd
 from tqdm import tqdm
-from rdkit import Chem, RDLogger
+from rdkit import RDLogger
 
-from utils import LiteLLMModel, HuggingFaceModel, extract_json_answer, strip_thinking
+from utils.backend import build_model
+from utils.parser import extract_json_answer, strip_thinking
+from utils.metrics import compute_reaction_predictions, _is_invalid_prediction
 # Adjust the module path / function name to match your forward-reaction data file
 from .data import (
     load_forward_dataset as load_dataset,
@@ -53,50 +55,7 @@ def _parse_prediction(raw_text):
     return ""
 
 
-# ── Validity / normalisation ────────────────────────────────────────────────
-def _is_invalid_prediction(smiles):
-    """True if the string is empty or RDKit cannot parse it."""
-    return not smiles or Chem.MolFromSmiles(smiles) is None
-
-
-def _normalise(smiles):
-    """Canonical SMILES of the whole string ("" if empty or invalid).
-
-    RDKit treats a '.'-separated SMILES as one molecule and writes its
-    components in a canonical order, so no manual split/sort is needed.
-    An invalid prediction returns "" and can never match a reference.
-    """
-    if not smiles:
-        return ""
-    mol = Chem.MolFromSmiles(smiles)
-    return Chem.MolToSmiles(mol) if mol is not None else ""
-
-
-# ── Metrics ─────────────────────────────────────────────────────────────────
-def _compute_metrics(y_true, y_pred):
-    """Top-1 accuracy and percentage of invalid predicted SMILES.
-
-    y_true: list of reference product SMILES
-    y_pred: list of parsed predicted product SMILES
-    """
-    n = len(y_true)
-    num_invalid = sum(_is_invalid_prediction(p) for p in y_pred)
-
-    norm_true = [_normalise(t) for t in y_true]
-    norm_pred = [_normalise(p) for p in y_pred]
-    correct_flags = [bool(p) and p == t for t, p in zip(norm_true, norm_pred)]
-    num_correct = sum(correct_flags)
-
-    metrics = {
-        "top1_accuracy": num_correct / n if n else 0.0,
-        "invalid_smiles_percent": 100.0 * num_invalid / n if n else 0.0,
-        "correct": num_correct,
-        "invalid": num_invalid,
-        "total": n,
-    }
-    return metrics, correct_flags
-
-
+# ── Metrics (see utils/metrics.py) ──────────────────────────────────────────
 def _print_metrics(metrics, model_name, sample_strategy, k):
     print(f"\n{'═' * 55}")
     print("  Task    : FORWARD REACTION PREDICTION (top-1)")
@@ -108,19 +67,6 @@ def _print_metrics(metrics, model_name, sample_strategy, k):
     print(f"  Invalid SMILES (%)   (↓): {metrics['invalid_smiles_percent']:.2f}"
           f"  ({metrics['invalid']}/{metrics['total']})")
     print(f"{'═' * 55}\n")
-
-
-# ── Model ───────────────────────────────────────────────────────────────────
-def _build_model(backend, model_name, temperature, max_new_tokens=256):
-    if backend == "api":
-        return LiteLLMModel(model_name=model_name, max_new_tokens=max_new_tokens)
-    elif backend == "local":
-        return HuggingFaceModel(
-            temperature=temperature,
-            model_name=model_name,
-            max_new_tokens=max_new_tokens,
-        )
-    raise ValueError(f"Unknown backend: {backend!r}. Use 'api' or 'local'.")
 
 
 # ── Benchmark ───────────────────────────────────────────────────────────────
@@ -146,7 +92,7 @@ def run_benchmark(
 
     # 2. Build model
     print(f"[*] Initialising model: {model_name}  (backend={backend})")
-    model = _build_model(backend, model_name, temperature, max_new_tokens)
+    model = build_model(backend, model_name, temperature, max_new_tokens)
 
     # 3. Inference (top-1 -> n=1, first completion only)
     raw_outputs, predictions = [], []
@@ -163,7 +109,7 @@ def run_benchmark(
 
     # 4. Evaluate + print
     print("[*] Computing metrics …")
-    metrics, correct_flags = _compute_metrics(y_true, predictions)
+    metrics, correct_flags = compute_reaction_predictions(y_true, predictions)
     _print_metrics(metrics, model_name, sample_strategy, k)
 
     # 5. Save

@@ -5,9 +5,11 @@ import argparse
 import datetime
 import pandas as pd
 from tqdm import tqdm
-from rdkit import Chem, RDLogger
+from rdkit import RDLogger
 
-from utils import LiteLLMModel, HuggingFaceModel, extract_json_answer, strip_thinking
+from utils.backend import LiteLLMModel, build_model
+from utils.parser import extract_json_answer, strip_thinking
+from utils.metrics import compute_retrosynthesis, _is_invalid_retro_prediction
 from .data import (
     load_retro_dataset as load_dataset, INPUT_COL, TARGET_COL, INPUT_LABEL, TARGET_LABEL,
 )
@@ -46,57 +48,7 @@ def _parse_prediction(raw_text):
     return ""
 
 
-# ── Validity / normalisation ────────────────────────────────────────────────
-def _is_invalid_prediction(smiles):
-    """True if the string is empty or any '.'-separated fragment fails to parse."""
-    if not smiles:
-        return True
-    for frag in smiles.split("."):
-        if not frag or Chem.MolFromSmiles(frag) is None:
-            return True
-    return False
-
-
-def _normalise(smiles):
-    """Canonicalise every fragment, sort them, and re-join with '.'.
-
-    Returns "" if the string is empty or any fragment is invalid, so an invalid
-    prediction can never match a reference.
-    """
-    if not smiles:
-        return ""
-    canon = []
-    for frag in smiles.split("."):
-        mol = Chem.MolFromSmiles(frag) if frag else None
-        if mol is None:
-            return ""
-        canon.append(Chem.MolToSmiles(mol))
-    return ".".join(sorted(canon))
-
-
-# ── Metrics ─────────────────────────────────────────────────────────────────
-def _compute_metrics(y_true, y_pred):
-    """Top-1 accuracy and percentage of invalid predicted SMILES.
-
-    y_true: list of reference reactant SMILES
-    y_pred: list of parsed predicted reactant SMILES
-    """
-    n = len(y_true)
-    num_invalid = sum(_is_invalid_prediction(p) for p in y_pred)
-
-    norm_true = [_normalise(t) for t in y_true]
-    norm_pred = [_normalise(p) for p in y_pred]
-    num_correct = sum(1 for t, p in zip(norm_true, norm_pred) if p and p == t)
-
-    return {
-        "top1_accuracy": num_correct / n if n else 0.0,
-        "invalid_smiles_percent": 100.0 * num_invalid / n if n else 0.0,
-        "correct": num_correct,
-        "invalid": num_invalid,
-        "total": n,
-    }
-
-
+# ── Metrics (see utils/metrics.py) ──────────────────────────────────────────
 def _print_metrics(metrics, model_name, sample_strategy, k):
     print(f"\n{'═' * 55}")
     print("  Task    : RETROSYNTHESIS (top-1)")
@@ -108,19 +60,6 @@ def _print_metrics(metrics, model_name, sample_strategy, k):
     print(f"  Invalid SMILES (%)   (↓): {metrics['invalid_smiles_percent']:.2f}"
           f"  ({metrics['invalid']}/{metrics['total']})")
     print(f"{'═' * 55}\n")
-
-
-# ── Model ───────────────────────────────────────────────────────────────────
-def _build_model(backend, model_name, temperature, max_new_tokens=256):
-    if backend == "api":
-        return LiteLLMModel(model_name=model_name, max_new_tokens=max_new_tokens)
-    elif backend == "local":
-        return HuggingFaceModel(
-            temperature=temperature,
-            model_name=model_name,
-            max_new_tokens=max_new_tokens,
-        )
-    raise ValueError(f"Unknown backend: {backend!r}. Use 'api' or 'local'.")
 
 
 # ── Benchmark ───────────────────────────────────────────────────────────────
@@ -146,7 +85,7 @@ def run_benchmark(
 
     # 2. Build model
     print(f"[*] Initialising model: {model_name}  (backend={backend})")
-    model = _build_model(backend, model_name, temperature, max_new_tokens)
+    model = build_model(backend, model_name, temperature, max_new_tokens)
 
     # 3. Inference (top-1 -> n=1, first completion only)
     raw_outputs, predictions = [], []
@@ -168,7 +107,7 @@ def run_benchmark(
 
     # 4. Evaluate + print
     print("[*] Computing metrics …")
-    metrics = _compute_metrics(y_true, predictions)
+    metrics, correct_flags = compute_retrosynthesis(y_true, predictions)
     _print_metrics(metrics, model_name, sample_strategy, k)
 
     # 5. Save
@@ -181,11 +120,8 @@ def run_benchmark(
     results_df["raw_output"] = raw_outputs
     results_df["prediction"] = predictions
     results_df["ground_truth"] = y_true
-    results_df["is_correct"] = [
-        bool(_normalise(p)) and _normalise(p) == _normalise(t)
-        for p, t in zip(predictions, y_true)
-    ]
-    results_df["is_invalid"] = [_is_invalid_prediction(p) for p in predictions]
+    results_df["is_correct"] = correct_flags
+    results_df["is_invalid"] = [_is_invalid_retro_prediction(p) for p in predictions]
     csv_path = os.path.join(output_dir, f"{run_tag}_predictions.csv")
     results_df.to_csv(csv_path, index=False)
 

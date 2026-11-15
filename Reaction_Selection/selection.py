@@ -5,10 +5,12 @@ import argparse
 import datetime
 import pandas as pd
 from tqdm import tqdm
-from rdkit import Chem, RDLogger
+from rdkit import RDLogger
 from pathlib import Path
 
-from utils import LiteLLMModel, HuggingFaceModel, extract_json_answer, strip_thinking
+from utils.backend import build_model
+from utils.parser import extract_json_answer, strip_thinking
+from utils.metrics import compute_reaction_selection
 from .data import load_dataset, TASK_MAP as CSV_MAP   # task -> csv filename
 
 RDLogger.DisableLog("rdApp.*")  # silence RDKit parse warnings
@@ -89,35 +91,7 @@ def _parse_prediction(raw_text, task):
     return ""
 
 
-# ── Normalisation ───────────────────────────────────────────────────────────
-def _normalise(smiles):
-    """Canonical SMILES if RDKit can parse it, else the stripped raw string
-    (some organometallic ligands fail RDKit sanitisation)."""
-    if not smiles:
-        return ""
-    smiles = str(smiles).strip()
-    mol = Chem.MolFromSmiles(smiles)
-    return Chem.MolToSmiles(mol) if mol is not None else smiles
-
-
-# ── Metrics ─────────────────────────────────────────────────────────────────
-def _compute_accuracy(y_true, y_pred):
-    """Accuracy = fraction of predictions matching the ground truth."""
-    n = len(y_true)
-    correct_flags = [
-        bool(p) and p == t
-        for t, p in zip((_normalise(t) for t in y_true),
-                        (_normalise(p) for p in y_pred))
-    ]
-    num_correct = sum(correct_flags)
-    metrics = {
-        "accuracy": num_correct / n if n else 0.0,
-        "correct": num_correct,
-        "total": n,
-    }
-    return metrics, correct_flags
-
-
+# ── Metrics (see utils/metrics.py) ──────────────────────────────────────────
 def _print_metrics(task, metrics, model_name):
     print(f"\n{'═' * 55}")
     print(f"  Task    : {task} (zero-shot)")
@@ -126,19 +100,6 @@ def _print_metrics(task, metrics, model_name):
     print(f"  Accuracy (↑): {metrics['accuracy']:.4f}"
           f"  ({metrics['correct']}/{metrics['total']})")
     print(f"{'═' * 55}\n")
-
-
-# ── Model ───────────────────────────────────────────────────────────────────
-def _build_model(backend, model_name, temperature, max_new_tokens=256):
-    if backend == "api":
-        return LiteLLMModel(model_name=model_name, max_new_tokens=max_new_tokens)
-    elif backend == "local":
-        return HuggingFaceModel(
-            temperature=temperature,
-            model_name=model_name,
-            max_new_tokens=max_new_tokens,
-        )
-    raise ValueError(f"Unknown backend: {backend!r}. Use 'api' or 'local'.")
 
 
 # ── Benchmark ───────────────────────────────────────────────────────────────
@@ -150,7 +111,9 @@ def run_task(task, model, model_name, data_dir):
     df = df.reset_index(drop=True)
     y_true = df["ground_truth"].astype(str).tolist()
 
-    raw_outputs, predictions = [], []
+    candidate_rank = df["candidate_rank"].to_list()
+
+    raw_outputs, predictions  = [], []
     print(f"[*] Running zero-shot inference on {len(user_prompts)} samples …")
     for idx in tqdm(range(len(user_prompts)), desc=task):
         outputs = model.generate(
@@ -162,7 +125,7 @@ def run_task(task, model, model_name, data_dir):
         raw_outputs.append(raw_text)
         predictions.append(_parse_prediction(raw_text, task))
 
-    metrics, correct_flags = _compute_accuracy(y_true, predictions)
+    metrics, correct_flags = compute_reaction_selection(y_true, predictions, candidate_rank, task)
     _print_metrics(task, metrics, model_name)
 
     results_df = df.copy()
@@ -189,7 +152,7 @@ def run_benchmark(
     """
     tasks = tasks or TASKS
     print(f"[*] Initialising model: {model_name}  (backend={backend})")
-    model = _build_model(backend, model_name, temperature, max_new_tokens)
+    model = build_model(backend, model_name, temperature, max_new_tokens)
 
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
