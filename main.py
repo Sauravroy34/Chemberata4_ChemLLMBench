@@ -10,6 +10,11 @@ Run specific tasks:
     python -m ChemLLMBench.main --model gpt-4 --backend api \
         --tasks name_prediction property_prediction
 
+Sample 5 completions per item and report mean ± std (model variance only;
+the test set and prompts are identical for every completion):
+    python -m ChemLLMBench.main --model gpt-4 --backend api \
+        --tasks all --n 5 --temperature 0.7
+
 Run the zero-shot reaction-component selection tasks:
     python -m ChemLLMBench.main --model gpt-4 --backend api \
         --tasks reaction_component_selection --data-dir path/to/csvs
@@ -223,14 +228,17 @@ def _extract_metrics(result):
 
 
 def _primary_metric(metrics):
-    """First available primary metric (0.0 is a valid value, not 'missing')."""
+    """(mean, std) of the first available primary metric; (None, None) if absent.
+
+    0.0 is a valid value, not 'missing'. std is None for legacy single-run dicts.
+    """
     for key in PRIMARY_METRIC_KEYS:
         if metrics.get(key) is not None:
-            return metrics[key]
-    return None
+            return metrics[key], metrics.get(f"{key}_std")
+    return None, None
 
 
-def _run_single_task(task_key, model_name, backend, sample_strategy, k,
+def _run_single_task(task_key, model_name, backend, sample_strategy, k, n,
                      temperature, max_new_tokens, output_dir, data_dir):
     """Run a single benchmark task and return its results dict."""
     entry = TASK_REGISTRY[task_key]
@@ -244,6 +252,7 @@ def _run_single_task(task_key, model_name, backend, sample_strategy, k,
     kwargs["backend"] = backend
     kwargs["sample_strategy"] = sample_strategy
     kwargs["k"] = k
+    kwargs["n"] = n
     kwargs["temperature"] = temperature
     kwargs["max_new_tokens"] = max_new_tokens
     kwargs["output_dir"] = output_dir
@@ -269,6 +278,7 @@ def run_all_benchmarks(
     tasks: list[str] | None = None,
     sample_strategy: str = "random",
     k: int = 8,
+    n: int = 1,
     temperature: float = 0.0,
     max_new_tokens: int = 256,
     output_dir: str = "results",
@@ -292,6 +302,11 @@ def run_all_benchmarks(
     k : int
         Number of few-shot examples (0 for zero-shot).
         Ignored by zero-shot-only tasks (reaction component selection).
+    n : int
+        Completions sampled per test item. The test set is built once; the
+        r-th completion of every item forms run r, each run is scored, and
+        metrics are reported as mean ± std over the n runs (model variance,
+        not dataset variance).
     temperature : float
         Sampling temperature.
     max_new_tokens : int
@@ -339,6 +354,7 @@ def run_all_benchmarks(
     print(f"  Model    : {model_name}")
     print(f"  Backend  : {backend}")
     print(f"  Strategy : {sample_strategy} (k={k})")
+    print(f"  Samples  : n={n} completion(s) per item, temperature={temperature}")
     print(f"  Data dir : {data_dir}")
     print(f"  Tasks    : {', '.join(task_keys)}")
     print(f"{'═' * 70}")
@@ -351,6 +367,7 @@ def run_all_benchmarks(
             backend=backend,
             sample_strategy=sample_strategy,
             k=k,
+            n=n,
             temperature=temperature,
             max_new_tokens=max_new_tokens,
             output_dir=output_dir,
@@ -366,10 +383,22 @@ def run_all_benchmarks(
         display = TASK_REGISTRY[task_key]["display"]
         if res["status"] == "success":
             metrics = _extract_metrics(res["result"])
-            primary = _primary_metric(metrics)
-            metric_str = f"{primary:.4f}" if primary is not None else "done"
+            primary, primary_std = _primary_metric(metrics)
+            multi = metrics.get("n_runs", 1) > 1
+            if primary is None:
+                metric_str = "done"
+            elif multi and primary_std is not None:
+                metric_str = f"{primary:.4f} ± {primary_std:.4f}"
+            else:
+                metric_str = f"{primary:.4f}"
             invalid = metrics.get(INVALID_METRIC_KEY)
-            invalid_str = f"  (invalid: {invalid:.2f}%)" if invalid is not None else ""
+            invalid_std = metrics.get(INVALID_METRIC_KEY + "_std")
+            if invalid is None:
+                invalid_str = ""
+            elif multi and invalid_std is not None:
+                invalid_str = f"  (invalid: {invalid:.2f} ± {invalid_std:.2f}%)"
+            else:
+                invalid_str = f"  (invalid: {invalid:.2f}%)"
             print(f"  ✓ {display:<45s}  {metric_str}{invalid_str}")
         else:
             print(f"  ✗ {display:<45s}  FAILED: {res['error'][:40]}")
@@ -384,6 +413,7 @@ def run_all_benchmarks(
         "backend": backend,
         "sample_strategy": sample_strategy,
         "k": k,
+        "n": n,
         "temperature": temperature,
         "data_dir": data_dir,
         "timestamp": timestamp,
@@ -436,6 +466,9 @@ def main():
     )
     parser.add_argument("--k", type=int, default=8,
                         help="Number of few-shot examples (0 = zero-shot; not used by selection tasks).")
+    parser.add_argument("--n", type=int, default=1,
+                        help="Completions sampled per test item. The dataset is fixed; metrics are "
+                             "reported as mean ± std over the n runs (model variance only).")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature.")
     parser.add_argument("--max-new-tokens", type=int, default=256, help="Max new tokens to generate.")
     parser.add_argument("--output-dir", type=str, default="results", help="Output directory.")
@@ -451,6 +484,7 @@ def main():
         tasks=args.tasks,
         sample_strategy=args.strategy,
         k=args.k,
+        n=args.n,
         temperature=args.temperature,
         max_new_tokens=args.max_new_tokens,
         output_dir=args.output_dir,

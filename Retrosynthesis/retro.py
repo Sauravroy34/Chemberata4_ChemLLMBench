@@ -10,6 +10,9 @@ from rdkit import RDLogger
 from utils.backend import LiteLLMModel, build_model
 from utils.parser import extract_json_answer, strip_thinking
 from utils.metrics import compute_retrosynthesis, _is_invalid_retro_prediction
+from utils.aggregate import (
+    pad_outputs, split_runs, aggregate_runs, add_run_columns, format_mean_std,
+)
 from .data import (
     load_retro_dataset as load_dataset, INPUT_COL, TARGET_COL, INPUT_LABEL, TARGET_LABEL,
 )
@@ -54,11 +57,12 @@ def _print_metrics(metrics, model_name, sample_strategy, k):
     print("  Task    : RETROSYNTHESIS (top-1)")
     print(f"  Model   : {model_name}")
     print(f"  Strategy: {sample_strategy} (k={k})")
+    print(f"  Runs    : n={metrics['n_runs']}")
     print(f"{'─' * 55}")
-    print(f"  Top-1 Accuracy       (↑): {metrics['top1_accuracy']:.4f}"
-          f"  ({metrics['correct']}/{metrics['total']})")
-    print(f"  Invalid SMILES (%)   (↓): {metrics['invalid_smiles_percent']:.2f}"
-          f"  ({metrics['invalid']}/{metrics['total']})")
+    print(f"  Top-1 Accuracy       (↑): {format_mean_std(metrics, 'top1_accuracy')}"
+          f"  ({format_mean_std(metrics, 'correct', 1)}/{metrics['total']})")
+    print(f"  Invalid SMILES (%)   (↓): {format_mean_std(metrics, 'invalid_smiles_percent', 2)}"
+          f"  ({format_mean_std(metrics, 'invalid', 1)}/{metrics['total']})")
     print(f"{'═' * 55}\n")
 
 
@@ -68,13 +72,23 @@ def run_benchmark(
     backend: str = "api",
     sample_strategy: str = "random",
     k: int = 8,
+    n: int = 1,
     temperature: float = 0.0,
     max_new_tokens: int = 256,
     output_dir: str = "results",
 ):
     """Run top-1 retrosynthesis benchmark.
 
-    Returns dict with keys: "metrics", "predictions", "raw_outputs"
+    n completions are drawn per target and scored as n runs over the same
+    test set (mean ± std = model variance, not dataset variance).
+
+    Returns
+    dict with keys:
+      "metrics"     : mean over the n runs under the usual metric names,
+                      "<name>_std" for each numeric metric, "n_runs" and
+                      "per_run" (list of the n single-run metric dicts)
+      "predictions" : run-major list, predictions[r][i] for run r, item i
+      "raw_outputs" : run-major list of raw completions, same layout
     """
     # 1. Load data & prompts
     print(f"[*] Loading retrosynthesis data (strategy={sample_strategy}, k={k})")
@@ -87,27 +101,36 @@ def run_benchmark(
     print(f"[*] Initialising model: {model_name}  (backend={backend})")
     model = build_model(backend, model_name, temperature, max_new_tokens)
 
-    # 3. Inference (top-1 -> n=1, first completion only)
-    raw_outputs, predictions = [], []
-    print(f"[*] Running inference on {len(user_prompts)} samples …")
+    # 3. Inference: n completions per target, regrouped into n runs
+    # The test set and its few-shot prompts were built exactly once above.
+    # Every one of the `n` completions of an item reuses that same prompt, so
+    # n > 1 measures model (sampling) variance only, never dataset variance.
+    per_item_outputs = []  # item-major: per_item_outputs[idx] -> n completions
+
+    print(f"[*] Running inference on {len(user_prompts)} samples  (n={n} completions each) …")
     for idx in tqdm(range(len(user_prompts)), desc="RETRO"):
         outputs = model.generate(
             user_prompt=user_prompts[idx],
             sys_prompt=system_prompts[idx],
-            n=1,
+            n=n,
         )
-        raw_text = outputs[0] if outputs else ""
-        raw_outputs.append(raw_text)
-        predictions.append(_parse_prediction(raw_text))
+        per_item_outputs.append(pad_outputs(outputs, n))
+
+    # run-major: raw_outputs[r][idx] is run r's completion for item idx
+    raw_outputs = split_runs(per_item_outputs, n)
+    predictions = [[_parse_prediction(t) for t in run] for run in raw_outputs]
 
     if type(model) is LiteLLMModel:
         print(f"[✓] Total API cost: ${model.cost:.4f}")
 
         model.cost = 0.0  # Reset cost for next run
 
-    # 4. Evaluate + print
+    # 4. Evaluate every run, then report mean ± std
     print("[*] Computing metrics …")
-    metrics, correct_flags = compute_retrosynthesis(y_true, predictions)
+    per_run = [compute_retrosynthesis(y_true, preds) for preds in predictions]
+    per_run_metrics = [m for m, _ in per_run]
+    correct_flags = [flags for _, flags in per_run]  # run-major
+    metrics = aggregate_runs(per_run_metrics)
     _print_metrics(metrics, model_name, sample_strategy, k)
 
     # 5. Save
@@ -117,11 +140,12 @@ def run_benchmark(
     run_tag = f"RETRO_{safe_model}_{sample_strategy}_k{k}_{timestamp}"
 
     results_df = df_test.copy().reset_index(drop=True)
-    results_df["raw_output"] = raw_outputs
-    results_df["prediction"] = predictions
     results_df["ground_truth"] = y_true
-    results_df["is_correct"] = correct_flags
-    results_df["is_invalid"] = [_is_invalid_retro_prediction(p) for p in predictions]
+    add_run_columns(results_df, "raw_output", raw_outputs)
+    add_run_columns(results_df, "prediction", predictions)
+    add_run_columns(results_df, "is_correct", correct_flags)
+    add_run_columns(results_df, "is_invalid",
+                    [[_is_invalid_retro_prediction(p) for p in preds] for preds in predictions])
     csv_path = os.path.join(output_dir, f"{run_tag}_predictions.csv")
     results_df.to_csv(csv_path, index=False)
 
@@ -131,6 +155,7 @@ def run_benchmark(
         "backend": backend,
         "sample_strategy": sample_strategy,
         "k": k,
+        "n": n,
         "temperature": temperature,
         "timestamp": timestamp,
         "metrics": metrics,
@@ -155,6 +180,8 @@ def main():
     parser.add_argument("--backend", type=str, default="api", choices=["api", "local"])
     parser.add_argument("--strategy", type=str, default="random", choices=["random", "scaffold"])
     parser.add_argument("--k", type=int, default=8, help="Few-shot examples (0 = zero-shot).")
+    parser.add_argument("--n", type=int, default=1,
+                        help="Completions per target; metrics are reported as mean ± std over n runs.")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--output-dir", type=str, default="results")
@@ -165,6 +192,7 @@ def main():
         backend=args.backend,
         sample_strategy=args.strategy,
         k=args.k,
+        n=args.n,
         temperature=args.temperature,
         max_new_tokens=args.max_new_tokens,
         output_dir=args.output_dir,
