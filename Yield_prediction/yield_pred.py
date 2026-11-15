@@ -14,6 +14,9 @@ except ImportError:
 from utils.backend import build_model
 from utils.parser import extract_json_answer, strip_thinking
 from utils.metrics import compute_yeild_predictions
+from utils.aggregate import (
+    pad_outputs, split_runs, aggregate_runs, add_run_columns, format_mean_std,
+)
 
 SUPPORTED_DATASETS = ["Buchwald-Hartwig", "Suzuki-Miyaura"]
 
@@ -61,6 +64,18 @@ def run_benchmark(
 ):
     """
     Run the yield-prediction benchmark on one dataset.
+
+    n completions are drawn per reaction and scored as n runs over the same
+    test set (mean ± std = model variance, not dataset variance).
+
+    Returns
+    -------
+    dict with keys:
+      "metrics"     : mean over the n runs under the usual metric names,
+                      "<name>_std" for each numeric metric, "n_runs" and
+                      "per_run" (list of the n single-run metric dicts)
+      "predictions" : run-major list, predictions[r][i] for run r, item i
+      "raw_outputs" : run-major list of raw completions, same layout
     """
     if dataset_name not in SUPPORTED_DATASETS:
         raise ValueError(
@@ -86,37 +101,37 @@ def run_benchmark(
     )
 
     # ── 3. Run inference ─────────────────────────────────────────────────
-    raw_outputs = []
-    predictions = []
+    # The test set and its few-shot prompts were built exactly once above.
+    # Every one of the `n` completions of an item reuses that same prompt, so
+    # n > 1 measures model (sampling) variance only, never dataset variance.
+    per_item_outputs = []  # item-major: per_item_outputs[idx] -> n completions
 
-    print(f"[*] Running inference on {len(user_prompts)} molecules …")
+    print(f"[*] Running inference on {len(user_prompts)} reactions  (n={n} completions each) …")
     for idx in tqdm(range(len(user_prompts)), desc=dataset_name):
-        sys_prompt = system_prompts[idx]
-        usr_prompt = user_prompts[idx]
-
-        # Generate model response
         outputs = model.generate(
-            user_prompt=usr_prompt, sys_prompt=sys_prompt,
-            n=n
+            user_prompt=user_prompts[idx],
+            sys_prompt=system_prompts[idx],
+            n=n,
         )
+        per_item_outputs.append(pad_outputs(outputs, n))
 
-        raw_text = outputs[0] if outputs else ""
-        raw_outputs.append(raw_text)
+    # run-major: raw_outputs[r][idx] is run r's completion for item idx
+    raw_outputs = split_runs(per_item_outputs, n)
+    predictions = [[_parse_prediction(t) for t in run] for run in raw_outputs]
 
-        pred = _parse_prediction(raw_text)
-        predictions.append(pred)
-
-    # ── 4. Evaluate ──────────────────────────────────────────────────────
+    # ── 4. Evaluate: score every run, then report mean ± std ─────────────
     print("[*] Computing metrics …")
-    metrics = compute_yeild_predictions(y_true, predictions)
+    per_run_metrics = [compute_yeild_predictions(y_true, preds) for preds in predictions]
+    metrics = aggregate_runs(per_run_metrics)
 
     print(f"\n{'═' * 50}")
     print(f"  Dataset : {dataset_name}")
     print(f"  Model   : {model_name}")
     print(f"  Strategy: {sample_strategy} (k={k})")
     print(f"{'─' * 50}")
-    print(f"  Accuracy : {metrics['accuracy']:.4f}")
-    print(f"  Valid    : {metrics['valid_predictions']}/{metrics['total']}")
+    print(f"  Runs     : n={metrics['n_runs']}")
+    print(f"  Accuracy : {format_mean_std(metrics, 'accuracy')}")
+    print(f"  Valid    : {format_mean_std(metrics, 'valid_predictions', 1)}/{metrics['total']}")
     print(f"{'═' * 50}\n")
 
     # ── 5. Save results ──────────────────────────────────────────────────
@@ -127,11 +142,12 @@ def run_benchmark(
 
     # Save predictions CSV
     results_df = df_test.copy().reset_index(drop=True)
-    results_df["raw_output"] = raw_outputs
-    results_df["prediction"] = predictions
-    results_df["prediction_label"] = [
-        "Yes" if p == 1 else ("No" if p == 0 else "INVALID") for p in predictions
-    ]
+    add_run_columns(results_df, "raw_output", raw_outputs)
+    add_run_columns(results_df, "prediction", predictions)
+    add_run_columns(results_df, "prediction_label", [
+        ["Yes" if p == 1 else ("No" if p == 0 else "INVALID") for p in preds]
+        for preds in predictions
+    ])
     results_df["ground_truth_label"] = df_test["yeild"]
     csv_path = os.path.join(output_dir, f"{run_tag}_predictions.csv")
     results_df.to_csv(csv_path, index=False)
@@ -181,7 +197,8 @@ def main():
         help="Few-shot example sampling strategy.",
     )
     parser.add_argument("--k", type=int, default=8, help="Number of few-shot examples (0 = zero-shot).")
-    parser.add_argument("--n", type=int, default=1, help="Number of completions per molecule.")
+    parser.add_argument("--n", type=int, default=1,
+                        help="Completions per reaction; metrics are reported as mean ± std over n runs.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature.")
     parser.add_argument("--max-new-tokens", type=int, default=50, help="Max new tokens (local models).")
     parser.add_argument("--output-dir", type=str, default="results", help="Output directory.")

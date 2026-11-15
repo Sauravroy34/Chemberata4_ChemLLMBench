@@ -143,7 +143,8 @@ def build_model(backend, model_name, temperature, max_new_tokens=256):
               "local" -> HuggingFaceModel (vLLM)
     """
     if backend == "api":
-        return LiteLLMModel(model_name=model_name, max_new_tokens=max_new_tokens)
+        return LiteLLMModel(model_name=model_name, max_new_tokens=max_new_tokens,
+                            temperature=temperature)
     elif backend == "local":
         return HuggingFaceModel(
             temperature=temperature,

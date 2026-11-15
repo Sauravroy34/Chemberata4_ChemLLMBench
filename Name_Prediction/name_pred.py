@@ -29,6 +29,9 @@ from .data import load_dataset, TASK_COL_MAP
 from utils.backend import build_model
 from utils.parser import extract_json_answer, strip_thinking
 from utils.metrics import compute_name_predictions
+from utils.aggregate import (
+    pad_outputs, split_runs, aggregate_runs, add_run_columns, format_mean_std,
+)
 
 RDLogger.DisableLog("rdApp.*")  # silence RDKit parse warnings for invalid SMILES
 
@@ -111,7 +114,12 @@ def run_benchmark(
 
     Returns
     -------
-    dict  with keys: "metrics", "predictions", "raw_outputs"
+    dict with keys:
+      "metrics"     : mean over the n runs under the usual metric names,
+                      "<name>_std" for each numeric metric, "n_runs" and
+                      "per_run" (list of the n single-run metric dicts)
+      "predictions" : run-major list, predictions[r][i] for run r, item i
+      "raw_outputs" : run-major list of raw completions, same layout
     """
     if task_name not in SUPPORTED_TASKS:
         raise ValueError(
@@ -137,33 +145,43 @@ def run_benchmark(
     )
 
     # ── 3. Run inference ─────────────────────────────────────────────────
-    raw_outputs = []
-    predictions = []
+    # The test set and its few-shot prompts were built exactly once above.
+    # Every one of the `n` completions of an item reuses that same prompt, so
+    # n > 1 measures model (sampling) variance only, never dataset variance.
+    per_item_outputs = []  # item-major: per_item_outputs[idx] -> n completions
 
-    print(f"[*] Running inference on {len(user_prompts)} molecules …")
+    print(f"[*] Running inference on {len(user_prompts)} molecules  (n={n} completions each) …")
     for idx in tqdm(range(len(user_prompts)), desc=task_name):
         outputs = model.generate(
             user_prompt=user_prompts[idx],
             sys_prompt=system_prompts[idx],
             n=n,
         )
+        per_item_outputs.append(pad_outputs(outputs, n))
 
-        raw_text = outputs[0] if outputs else ""
-        raw_outputs.append(raw_text)
-        predictions.append(_parse_prediction(raw_text, task_name))
+    # run-major: raw_outputs[r][idx] is run r's completion for item idx
+    raw_outputs = split_runs(per_item_outputs, n)
+    predictions = [[_parse_prediction(t, task_name) for t in run] for run in raw_outputs]
 
-    # ── 4. Evaluate ──────────────────────────────────────────────────────
+    # ── 4. Evaluate: score every run, then report mean ± std ─────────────
     print("[*] Computing metrics …")
-    metrics = compute_name_predictions(y_true, predictions, TASK_SHORT_NAME[task_name])
+    per_run_metrics = [
+        compute_name_predictions(y_true, preds, TASK_SHORT_NAME[task_name])
+        for preds in predictions
+    ]
+    metrics = aggregate_runs(per_run_metrics)
 
     print(f"\n{'═' * 70}")
     print(f"  Model   : {model_name}")
     print(f"  Strategy: {sample_strategy} (k={k})")
-    print(f"  Correct : {metrics['correct']}/{metrics['total']}")
+    print(f"  Runs    : n={metrics['n_runs']}")
+    print(f"  Correct : {format_mean_std(metrics, 'correct', 1)}/{metrics['total']}")
     print(f"{'─' * 70}")
     header, values = format_accuracy_row({metrics["task"]: metrics["accuracy"]})
     print(header)
     print(values)
+    if metrics["n_runs"] > 1:
+        print(f"  accuracy = {format_mean_std(metrics, 'accuracy')}  (mean ± std over {metrics['n_runs']} runs)")
     print(f"{'═' * 70}\n")
 
     # ── 5. Save results ──────────────────────────────────────────────────
@@ -173,8 +191,8 @@ def run_benchmark(
     run_tag = f"{task_name}_{safe_model}_{sample_strategy}_k{k}_{timestamp}"
 
     results_df = df_test.copy().reset_index(drop=True)
-    results_df["raw_output"] = raw_outputs
-    results_df["prediction"] = predictions
+    add_run_columns(results_df, "raw_output", raw_outputs)
+    add_run_columns(results_df, "prediction", predictions)
     results_df["ground_truth"] = y_true
     csv_path = os.path.join(output_dir, f"{run_tag}_predictions.csv")
     results_df.to_csv(csv_path, index=False)
@@ -223,7 +241,8 @@ def main():
         help="Few-shot example sampling strategy.",
     )
     parser.add_argument("--k", type=int, default=8, help="Number of few-shot examples (0 = zero-shot).")
-    parser.add_argument("--n", type=int, default=1, help="Number of completions per molecule.")
+    parser.add_argument("--n", type=int, default=1,
+                        help="Completions per molecule; metrics are reported as mean ± std over n runs.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature.")
     parser.add_argument("--max-new-tokens", type=int, default=256, help="Max new tokens to generate.")
     parser.add_argument("--output-dir", type=str, default="results", help="Output directory.")

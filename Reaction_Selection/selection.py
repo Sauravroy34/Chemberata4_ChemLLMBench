@@ -11,6 +11,9 @@ from pathlib import Path
 from utils.backend import build_model
 from utils.parser import extract_json_answer, strip_thinking
 from utils.metrics import compute_reaction_selection
+from utils.aggregate import (
+    pad_outputs, split_runs, aggregate_runs, add_run_columns, format_mean_std,
+)
 from .data import load_dataset, TASK_MAP as CSV_MAP   # task -> csv filename
 
 RDLogger.DisableLog("rdApp.*")  # silence RDKit parse warnings
@@ -96,14 +99,15 @@ def _print_metrics(task, metrics, model_name):
     print(f"\n{'═' * 55}")
     print(f"  Task    : {task} (zero-shot)")
     print(f"  Model   : {model_name}")
+    print(f"  Runs    : n={metrics['n_runs']}")
     print(f"{'─' * 55}")
-    print(f"  Accuracy (↑): {metrics['accuracy']:.4f}"
-          f"  ({metrics['correct']}/{metrics['total']})")
+    print(f"  Accuracy (↑): {format_mean_std(metrics, 'accuracy')}"
+          f"  ({format_mean_std(metrics, 'correct', 1)}/{metrics['total']})")
     print(f"{'═' * 55}\n")
 
 
 # ── Benchmark ───────────────────────────────────────────────────────────────
-def run_task(task, model, model_name, data_dir):
+def run_task(task, model, model_name, data_dir, n=1):
 
     csv_path = str(Path(__file__).parent/CSV_MAP[task])
     print(f"[*] Loading {task} from {csv_path}")
@@ -113,25 +117,35 @@ def run_task(task, model, model_name, data_dir):
 
     candidate_rank = df["candidate_rank"].to_list()
 
-    raw_outputs, predictions  = [], []
-    print(f"[*] Running zero-shot inference on {len(user_prompts)} samples …")
+    # The test set and its few-shot prompts were built exactly once above.
+    # Every one of the `n` completions of an item reuses that same prompt, so
+    # n > 1 measures model (sampling) variance only, never dataset variance.
+    per_item_outputs = []  # item-major: per_item_outputs[idx] -> n completions
+
+    print(f"[*] Running zero-shot inference on {len(user_prompts)} samples  (n={n} completions each) …")
     for idx in tqdm(range(len(user_prompts)), desc=task):
         outputs = model.generate(
             user_prompt=user_prompts[idx],
             sys_prompt=system_prompts[idx],
-            n=1,
+            n=n,
         )
-        raw_text = outputs[0] if outputs else ""
-        raw_outputs.append(raw_text)
-        predictions.append(_parse_prediction(raw_text, task))
+        per_item_outputs.append(pad_outputs(outputs, n))
 
-    metrics, correct_flags = compute_reaction_selection(y_true, predictions, candidate_rank, task)
+    # run-major: raw_outputs[r][idx] is run r's completion for item idx
+    raw_outputs = split_runs(per_item_outputs, n)
+    predictions = [[_parse_prediction(t, task) for t in run] for run in raw_outputs]
+
+    per_run = [compute_reaction_selection(y_true, preds, candidate_rank, task)
+               for preds in predictions]
+    per_run_metrics = [m for m, _ in per_run]
+    correct_flags = [flags for _, flags in per_run]  # run-major
+    metrics = aggregate_runs(per_run_metrics)
     _print_metrics(task, metrics, model_name)
 
     results_df = df.copy()
-    results_df["raw_output"] = raw_outputs
-    results_df["prediction"] = predictions
-    results_df["is_correct"] = correct_flags
+    add_run_columns(results_df, "raw_output", raw_outputs)
+    add_run_columns(results_df, "prediction", predictions)
+    add_run_columns(results_df, "is_correct", correct_flags)
     return metrics, results_df, raw_outputs, predictions
 
 
@@ -140,6 +154,7 @@ def run_benchmark(
     backend: str = "api",
     tasks=None,
     data_dir: str = ".",
+    n: int = 1,
     temperature: float = 0.0,
     max_new_tokens: int = 256,
     k: int = 5,
@@ -148,7 +163,12 @@ def run_benchmark(
 ):
     """Zero-shot reagent / ligand / solvent selection benchmark (accuracy only).
 
-    Returns dict: task -> {"metrics", "predictions", "raw_outputs"}
+    n completions are drawn per sample and scored as n runs over the same
+    test set (mean ± std = model variance, not dataset variance).
+
+    Returns dict: task -> {"metrics", "predictions", "raw_outputs"} where
+    "metrics" holds mean / "<name>_std" / "n_runs" / "per_run" and the other
+    two are run-major lists ([run][item]).
     """
     tasks = tasks or TASKS
     print(f"[*] Initialising model: {model_name}  (backend={backend})")
@@ -161,7 +181,7 @@ def run_benchmark(
     all_metrics, results = {}, {}
     for task in tasks:
         metrics, results_df, raw_outputs, predictions = run_task(
-            task, model, model_name, data_dir
+            task, model, model_name, data_dir, n=n
         )
         all_metrics[task] = metrics
         results[task] = {"metrics": metrics, "predictions": predictions,
@@ -176,13 +196,14 @@ def run_benchmark(
     macro_acc = sum(m["accuracy"] for m in all_metrics.values()) / len(all_metrics)
     print(f"\n{'═' * 55}\n  SUMMARY | {model_name} (zero-shot)\n{'─' * 55}")
     for t, m in all_metrics.items():
-        print(f"  {t:<20} {m['accuracy']:.4f}  ({m['correct']}/{m['total']})")
+        print(f"  {t:<20} {format_mean_std(m, 'accuracy')}  ({format_mean_std(m, 'correct', 1)}/{m['total']})")
     print(f"  {'MACRO_AVG':<20} {macro_acc:.4f}\n{'═' * 55}\n")
 
     meta = {
         "model": model_name,
         "backend": backend,
         "setting": "zero-shot",
+        "n": n,
         "temperature": temperature,
         "timestamp": timestamp,
         "metrics": all_metrics,
@@ -206,6 +227,8 @@ def main():
     parser.add_argument("--tasks", nargs="+", default=TASKS, choices=TASKS)
     parser.add_argument("--data-dir", type=str, default=".",
                         help="Directory containing the *_sample.csv files.")
+    parser.add_argument("--n", type=int, default=1,
+                        help="Completions per sample; metrics are reported as mean ± std over n runs.")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--output-dir", type=str, default="results")
@@ -216,6 +239,7 @@ def main():
         backend=args.backend,
         tasks=args.tasks,
         data_dir=args.data_dir,
+        n=args.n,
         temperature=args.temperature,
         max_new_tokens=args.max_new_tokens,
         output_dir=args.output_dir,

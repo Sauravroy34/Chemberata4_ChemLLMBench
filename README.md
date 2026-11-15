@@ -238,6 +238,12 @@ The main entry point is `main.py`, which provides a standardized interface for r
 python main.py --model gpt-4 --backend api --tasks all
 ```
 
+#### Measure model variance: 5 completions per item, same dataset every time
+```bash
+python main.py --model gpt-4o --backend api --tasks all --n 5 --temperature 0.7
+```
+The test set and few-shot prompts are built once per task; only the model is sampled `n` times. Every metric is reported as mean ± std across the 5 runs.
+
 #### Run with a local open-source model using vLLM:
 ```bash
 python main.py \
@@ -414,6 +420,7 @@ print("Accuracy:", results["metrics"]["accuracy"])
 | `--tasks` | `list` | `all` | One or more task keys or task group names |
 | `--strategy`| `str` | `random` | Few-shot demonstration sampling: `random` or `scaffold` |
 | `--k` | `int` | `8` | Number of few-shot in-context examples (`0` = zero-shot) |
+| `--n` | `int` | `1` | Completions sampled per test item. The test set and prompts are built once; the r-th completion of every item forms run r, each run is scored, and every metric is reported as mean ± std over the n runs (model variance only, never dataset variance). Pair with `--temperature > 0`. |
 | `--temperature` | `float` | `0.0` | Generation sampling temperature |
 | `--max-new-tokens`| `int` | `256` | Maximum new tokens to generate |
 | `--output-dir`| `str` | `results`| Directory to store result files and summaries |
@@ -427,24 +434,35 @@ All evaluation runs write structured outputs to the directory specified by `--ou
 
 1. **Per-Task Predictions (`.csv`)**:
    Contains sample inputs, ground truth references, model raw completions, parsed answers, and correctness/validity flags.
+   Per-run columns are suffixed with the run index: `raw_output_run0`, `prediction_run0`, `is_correct_run0`, ..., `raw_output_run{n-1}` (with `--n 1` there is just the `_run0` set).
    - Example: `results/BBBP_gpt-4_scaffold_k8_20261028_120000_predictions.csv`
 
 2. **Per-Task Metric Metadata (`.json`)**:
-   Stores run configuration (model, backend, strategy, k, temperature) and final evaluated metrics.
+   Stores run configuration (model, backend, strategy, k, n, temperature) and final evaluated metrics.
+   `metrics` keeps the usual metric names as the **mean over the n runs**, adds `<metric>_std` (sample std, ddof=1; `0.0` when n = 1), `n_runs`, and `per_run` (the list of single-run metric dicts):
+   ```json
+   "metrics": {
+     "accuracy": 0.78, "accuracy_std": 0.0141,
+     "f1": 0.80, "f1_std": 0.0120,
+     "total": 100, "total_std": 0.0,
+     "n_runs": 3,
+     "per_run": [{"accuracy": 0.77, ...}, {"accuracy": 0.78, ...}, {"accuracy": 0.79, ...}]
+   }
+   ```
    - Example: `results/BBBP_gpt-4_scaffold_k8_20261028_120000_metrics.json`
 
 3. **Combined Benchmark Summary (`.json`)**:
    Generated automatically when using `main.py`, aggregating scores and statuses across all selected tasks:
    - Example: `results/benchmark_summary_20261028_120000.json`
 
-A formatted summary table is also printed directly to your terminal at the conclusion of each run:
+A formatted summary table is also printed directly to your terminal at the conclusion of each run (with `--n` > 1 the primary metric is shown as mean ± std):
 
 ```text
 ══════════════════════════════════════════════════════════════════════
   BENCHMARK SUMMARY
 ──────────────────────────────────────────────────────────────────────
   ✓ Name Prediction – SMILES → IUPAC             0.4200
-  ✓ Property Prediction – BBBP                   0.7800
+  ✓ Property Prediction – BBBP                   0.7800 ± 0.0141
   ✓ Forward Reaction Prediction                  0.6100  (invalid: 3.00%)
   ✓ Retrosynthesis                               0.4800  (invalid: 5.00%)
   ✓ Reaction Selection – Ligand (zero-shot)      0.5400
