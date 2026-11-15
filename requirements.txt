@@ -1,20 +1,18 @@
-pandas
 numpy
-rdkit
-requests
-
-# LLM Frameworks, API & Observability
-litellm
-langfuse
-python-dotenv
+pandas
 tqdm
-
-# Evaluation & Metrics
-scikit-learn
-evaluate
-Levenshtein
-rouge-score    
-nltk
-fcd
-transformers==4.49.0           
-vllm           
+requests                
+rdkit>=2023.3         
+scikit-learn>=1.3        
+Levenshtein              
+evaluate                 
+rouge-score             
+absl-py                  
+nltk                     
+fcd                    
+transformers==4.49.0     
+litellm                 
+vllm                  
+torch                  
+python-dotenv          
+langfuse                 

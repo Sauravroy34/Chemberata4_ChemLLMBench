@@ -4,17 +4,16 @@ import json
 import argparse
 import datetime
 import pandas as pd
-import numpy as np
 from tqdm import tqdm
-from sklearn.metrics import accuracy_score
 
 # Import your custom data loader
 try:
     from .data import load_function
 except ImportError:
     from data import load_function
-# Assuming utils is a local module you have that contains these classes
-from utils import LiteLLMModel, HuggingFaceModel, extract_json_answer, strip_thinking
+from utils.backend import build_model
+from utils.parser import extract_json_answer, strip_thinking
+from utils.metrics import compute_yeild_predictions
 
 SUPPORTED_DATASETS = ["Buchwald-Hartwig", "Suzuki-Miyaura"]
 
@@ -49,50 +48,6 @@ def _parse_prediction(raw_text):
     return -1
 
 
-def _compute_metrics(y_true, y_pred):
-    valid = np.array(y_pred) != -1
-    total = len(y_true)
-    n_valid = int(valid.sum())
-    n_invalid = total - n_valid
-
-    # For metric computation, replace invalid predictions with wrong answer
-    y_pred_clean = []
-    for yt, yp in zip(y_true, y_pred):
-        if yp == -1:
-            y_pred_clean.append(1 - yt)  # guaranteed wrong
-        else:
-            y_pred_clean.append(yp)
-
-    y_true_arr = np.array(y_true)
-    y_pred_arr = np.array(y_pred_clean)
-
-    metrics = {
-        "accuracy": accuracy_score(y_true_arr, y_pred_arr),
-        "total": total,
-        "valid_predictions": n_valid,
-        "invalid_predictions": n_invalid,
-    }
-
-    return metrics
-
-
-def _build_model(backend, model_name, temperature, max_new_tokens=50):
-    """Instantiate the right ModelInterface subclass."""
-    if backend == "api":
-        return LiteLLMModel(
-            model_name=model_name,
-            max_new_tokens=max_new_tokens
-        )
-    elif backend == "local":
-        return HuggingFaceModel(
-            temperature=temperature,
-            model_name=model_name,
-            max_new_tokens=max_new_tokens,
-        )
-    else:
-        raise ValueError(f"Unknown backend: {backend!r}. Use 'api' or 'local'.")
-
-
 def run_benchmark(
     dataset_name: str,
     model_name: str,
@@ -123,7 +78,7 @@ def run_benchmark(
 
     # ── 2. Build model ───────────────────────────────────────────────────
     print(f"[*] Initialising model: {model_name}  (backend={backend})")
-    model = _build_model(
+    model = build_model(
         backend=backend,
         model_name=model_name,
         temperature=temperature,
@@ -153,7 +108,7 @@ def run_benchmark(
 
     # ── 4. Evaluate ──────────────────────────────────────────────────────
     print("[*] Computing metrics …")
-    metrics = _compute_metrics(y_true, predictions)
+    metrics = compute_yeild_predictions(y_true, predictions)
 
     print(f"\n{'═' * 50}")
     print(f"  Dataset : {dataset_name}")

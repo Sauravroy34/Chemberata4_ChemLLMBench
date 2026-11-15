@@ -24,9 +24,11 @@ import argparse
 import datetime
 import pandas as pd
 from tqdm import tqdm
-from rdkit import Chem, RDLogger
+from rdkit import RDLogger
 from .data import load_dataset, TASK_COL_MAP
-from utils import LiteLLMModel, HuggingFaceModel , extract_json_answer, strip_thinking
+from utils.backend import build_model
+from utils.parser import extract_json_answer, strip_thinking
+from utils.metrics import compute_name_predictions
 
 RDLogger.DisableLog("rdApp.*")  # silence RDKit parse warnings for invalid SMILES
 
@@ -42,9 +44,6 @@ TASK_SHORT_NAME = {
     "IUPAC_TO_FORMULA":   "iupac2formula",
 }
 REPORT_COLUMNS = list(TASK_SHORT_NAME.values())
-
-_FORMULA_TOKEN = re.compile(r"([A-Z][a-z]?)(\d*)")
-
 
 # ── Helper: parse the generated answer from raw LLM output ──────────────────
 def _parse_prediction(raw_text, task_name):
@@ -86,66 +85,6 @@ def _parse_prediction(raw_text, task_name):
     return ""
 
 
-# ── Normalisers (one per target type) ───────────────────────────────────────
-def _canonical(s):
-    """Canonical SMILES, or "" if empty/invalid."""
-    if not s:
-        return ""
-    mol = Chem.MolFromSmiles(s)
-    return Chem.MolToSmiles(mol) if mol is not None else ""
-
-
-def _formula_key(s):
-    """Order-independent key for a molecular formula, e.g. 'H6C2O' == 'C2H6O'.
-
-    Case-sensitive on purpose: 'CO' (carbon monoxide) is not 'Co' (cobalt).
-    Falls back to the whitespace-stripped string if it can't be parsed
-    (parentheses, charges, etc.).
-    """
-    s = re.sub(r"\s+", "", s)
-    if not s:
-        return ""
-    tokens = _FORMULA_TOKEN.findall(s)
-    if "".join(el + n for el, n in tokens) != s:
-        return s
-    counts = {}
-    for el, n in tokens:
-        counts[el] = counts.get(el, 0) + (int(n) if n else 1)
-    return ",".join(f"{el}{c}" for el, c in sorted(counts.items()))
-
-
-def _iupac_key(s):
-    """Lower-cased, whitespace-collapsed IUPAC name."""
-    return re.sub(r"\s+", " ", s.strip().lower())
-
-
-def _normaliser_for(to_col):
-    return {"smiles": _canonical, "formula": _formula_key, "iupac": _iupac_key}[to_col]
-
-
-# ── Helper: compute metrics (accuracy only) ─────────────────────────────────
-def _compute_metrics(y_true, y_pred, task_name):
-    """Accuracy: fraction of predictions equal to the reference after
-    normalisation. Empty or invalid predictions never count as correct."""
-    _, to_col = TASK_COL_MAP[task_name]
-    norm = _normaliser_for(to_col)
-
-    correct = 0
-    for gt, pred in zip(y_true, y_pred):
-        p = norm(str(pred).strip())
-        t = norm(str(gt).strip())
-        if p and p == t:
-            correct += 1
-
-    total = len(y_true)
-    return {
-        "task": TASK_SHORT_NAME[task_name],
-        "accuracy": correct / total if total else 0.0,
-        "correct": correct,
-        "total": total,
-    }
-
-
 def format_accuracy_row(results):
     """results: {short_task_name: accuracy}. Returns (header_line, value_line)."""
     header = "  ".join(f"{c:>14}" for c in REPORT_COLUMNS)
@@ -153,28 +92,6 @@ def format_accuracy_row(results):
         f"{results[c]:>14.4f}" if c in results else f"{'-':>14}" for c in REPORT_COLUMNS
     )
     return header, values
-
-
-# ── Helper: build model ─────────────────────────────────────────────────────
-def _build_model(backend, model_name, temperature, max_new_tokens=256):
-    """Instantiate the right ModelInterface subclass.
-
-    Uses a longer default *max_new_tokens* (256) than Property Prediction
-    because IUPAC names can be lengthy.
-    """
-    if backend == "api":
-        return LiteLLMModel(
-            model_name=model_name,
-            max_new_tokens=max_new_tokens,
-        )
-    elif backend == "local":
-        return HuggingFaceModel(
-            temperature=temperature,
-            model_name=model_name,
-            max_new_tokens=max_new_tokens,
-        )
-    else:
-        raise ValueError(f"Unknown backend: {backend!r}. Use 'api' or 'local'.")
 
 
 # ── Main benchmark runner ────────────────────────────────────────────────────
@@ -212,7 +129,7 @@ def run_benchmark(
 
     # ── 2. Build model ───────────────────────────────────────────────────
     print(f"[*] Initialising model: {model_name}  (backend={backend})")
-    model = _build_model(
+    model = build_model(
         backend=backend,
         model_name=model_name,
         temperature=temperature,
@@ -237,7 +154,7 @@ def run_benchmark(
 
     # ── 4. Evaluate ──────────────────────────────────────────────────────
     print("[*] Computing metrics …")
-    metrics = _compute_metrics(y_true, predictions, task_name)
+    metrics = compute_name_predictions(y_true, predictions, TASK_SHORT_NAME[task_name])
 
     print(f"\n{'═' * 70}")
     print(f"  Model   : {model_name}")

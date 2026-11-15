@@ -3,31 +3,16 @@ import re
 import json
 import argparse
 import datetime
-import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import evaluate
-import Levenshtein
-from rdkit import Chem, DataStructs
-from rdkit.Chem import rdFingerprintGenerator, MACCSkeys
 
-from utils import LiteLLMModel, HuggingFaceModel , strip_thinking , extract_json_answer
+from utils.backend import build_model
+from utils.parser import strip_thinking, extract_json_answer
+from utils.metrics import compute_caption_metrices, compute_design_metrices
 from .data import load_dataset, TASK_COL_MAP
 
 # ── Supported tasks ─────────────────────────────────────────────────────────
 SUPPORTED_TASKS = list(TASK_COL_MAP.keys())
-
-# ── Metric loaders (cached so each is loaded once) ──────────────────────────
-_METRIC_CACHE = {}
-
-
-def _get_metric(name):
-    if name not in _METRIC_CACHE:
-        _METRIC_CACHE[name] = evaluate.load(name)
-    return _METRIC_CACHE[name]
-
-
-_morgan_gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
 
 
 # ── Parsing ─────────────────────────────────────────────────────────────────
@@ -65,113 +50,13 @@ def _parse_prediction(raw_text, task_name):
     return ""
 
 
-# ── Chemistry helpers ───────────────────────────────────────────────────────
-def _fp_similarities(mol_a, mol_b):
-    """Tanimoto similarity of (MACCS, RDK, Morgan) fingerprints."""
-    maccs = DataStructs.TanimotoSimilarity(
-        MACCSkeys.GenMACCSKeys(mol_a), MACCSkeys.GenMACCSKeys(mol_b))
-    rdk = DataStructs.TanimotoSimilarity(
-        Chem.RDKFingerprint(mol_a), Chem.RDKFingerprint(mol_b))
-    morgan = DataStructs.TanimotoSimilarity(
-        _morgan_gen.GetFingerprint(mol_a), _morgan_gen.GetFingerprint(mol_b))
-    return maccs, rdk, morgan
-
-
-def _compute_fcd(valid_pred_smiles, true_smiles):
-    """FCD between valid predictions and ground truth. NaN if unavailable."""
-    try:
-        from fcd import get_fcd , load_ref_model
-        model = load_ref_model()
-        if len(valid_pred_smiles) < 2 or len(true_smiles) < 2:
-            return float("nan")
-        return float(get_fcd(valid_pred_smiles, true_smiles,model))
-    except Exception as e:
-        print(f"[!] FCD could not be computed: {e}")
-        return float("nan")
-
-
-# ── Metrics ─────────────────────────────────────────────────────────────────
-def _caption_metrics(y_true, y_pred):
-    bleu = _get_metric("bleu")
-    rouge = _get_metric("rouge")
-    meteor = _get_metric("meteor")
-
-    refs = [[t] for t in y_true]  # HF bleu expects a list of reference lists
-
-    bleu2 = bleu.compute(predictions=y_pred, references=refs, max_order=2)["bleu"]
-    bleu4 = bleu.compute(predictions=y_pred, references=refs, max_order=4)["bleu"]
-
-    r = rouge.compute(predictions=y_pred, references=y_true, use_stemmer=True)
-    m = meteor.compute(predictions=y_pred, references=y_true)["meteor"]
-
-    return {
-        "bleu2": float(bleu2),
-        "bleu4": float(bleu4),
-        "rouge1": float(r["rouge1"]),
-        "rouge2": float(r["rouge2"]),
-        "rougeL": float(r["rougeL"]),
-        "meteor": float(m),
-        "total": len(y_true),
-    }
-
-
-def _design_metrics(y_true, y_pred):
-    n = len(y_true)
-
-    # BLEU on character-level SMILES tokens
-    bleu = _get_metric("bleu").compute(
-        predictions=y_pred,
-        references=[[t] for t in y_true],
-        tokenizer=lambda s: list(s),
-    )["bleu"]
-
-    # Levenshtein over all samples (invalid/empty predictions still count)
-    lev = float(np.mean([Levenshtein.distance(t, p) for t, p in zip(y_true, y_pred)]))
-
-    exact, valid = 0, 0
-    maccs_s, rdk_s, morgan_s = [], [], []
-    valid_pred_can, true_can = [], []
-
-    for t, p in zip(y_true, y_pred):
-        mol_t = Chem.MolFromSmiles(t) if t else None
-        mol_p = Chem.MolFromSmiles(p) if p else None
-        if mol_t is not None:
-            true_can.append(Chem.MolToSmiles(mol_t))
-        if mol_p is None:
-            continue
-        valid += 1
-        valid_pred_can.append(Chem.MolToSmiles(mol_p))
-        if mol_t is None:
-            continue
-        if Chem.MolToSmiles(mol_t) == Chem.MolToSmiles(mol_p):
-            exact += 1
-        m, r, mo = _fp_similarities(mol_t, mol_p)
-        maccs_s.append(m)
-        rdk_s.append(r)
-        morgan_s.append(mo)
-
-    mean_or_zero = lambda xs: float(np.mean(xs)) if xs else 0.0
-
-    return {
-        "bleu": float(bleu),
-        "exact": exact / n,
-        "levenshtein": lev,
-        "validity": valid / n,
-        "maccs_fts": mean_or_zero(maccs_s),   # averaged over valid predictions only
-        "rdk_fts": mean_or_zero(rdk_s),
-        "morgan_fts": mean_or_zero(morgan_s),
-        "fcd": _compute_fcd(valid_pred_can, true_can),
-        "valid_predictions": valid,
-        "total": n,
-    }
-
-
+# ── Metrics (see utils/metrics.py) ──────────────────────────────────────────
 def _compute_metrics(y_true, y_pred, task_name):
     """y_true: list of references, y_pred: list of parsed predictions."""
     if task_name == "MOL_CAPTION":
-        return _caption_metrics(y_true, y_pred)
+        return compute_caption_metrices(y_true, y_pred)
     elif task_name == "MOL_DESIGN":
-        return _design_metrics(y_true, y_pred)
+        return compute_design_metrices(y_true, y_pred)
     raise ValueError(f"No metrics defined for task: {task_name!r}")
 
 
@@ -199,19 +84,6 @@ def _print_metrics(metrics, task_name, model_name, sample_strategy, k):
         print(f"  FCD         (↓): {metrics['fcd']:.4f}")
         print(f"  Valid        : {metrics['valid_predictions']}/{metrics['total']}")
     print(f"{'═' * 55}\n")
-
-
-# ── Model ───────────────────────────────────────────────────────────────────
-def _build_model(backend, model_name, temperature, max_new_tokens=256):
-    if backend == "api":
-        return LiteLLMModel(model_name=model_name, max_new_tokens=max_new_tokens)
-    elif backend == "local":
-        return HuggingFaceModel(
-            temperature=temperature,
-            model_name=model_name,
-            max_new_tokens=max_new_tokens,
-        )
-    raise ValueError(f"Unknown backend: {backend!r}. Use 'api' or 'local'.")
 
 
 # ── Benchmark ───────────────────────────────────────────────────────────────
@@ -243,7 +115,7 @@ def run_benchmark(
 
     # 2. Build model
     print(f"[*] Initialising model: {model_name}  (backend={backend})")
-    model = _build_model(backend, model_name, temperature, max_new_tokens)
+    model = build_model(backend, model_name, temperature, max_new_tokens)
 
     # 3. Inference
     raw_outputs, predictions = [], []

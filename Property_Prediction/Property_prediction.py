@@ -28,15 +28,13 @@ import re
 import json
 import argparse
 import datetime
-import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from sklearn.metrics import (
-    accuracy_score, f1_score
-)
 
 from .data import load_dataset, LABEL_COL_MAP, TASK_DESCRIPTION
-from utils import LiteLLMModel, HuggingFaceModel ,extract_json_answer, strip_thinking
+from utils.backend import build_model
+from utils.parser import extract_json_answer, strip_thinking
+from utils.metrics import compute_property_predictions
 
 
 # ── Supported datasets ──────────────────────────────────────────────────────
@@ -74,58 +72,6 @@ def _parse_prediction(raw_text, dataset_name):
         return 1 if fallback.group(1).lower() == "yes" else 0
 
     return -1
-
-
-# ── Helper: compute metrics ─────────────────────────────────────────────────
-def _compute_metrics(y_true, y_pred):
-    """Compute standard classification metrics. Invalid predictions (-1) are
-    treated as incorrect (mapped to the minority class complement)."""
-
-    # Mask for valid predictions
-    valid = np.array(y_pred) != -1
-    total = len(y_true)
-    n_valid = int(valid.sum())
-    n_invalid = total - n_valid
-
-    # For metric computation, replace invalid predictions with wrong answer
-    y_pred_clean = []
-    for yt, yp in zip(y_true, y_pred):
-        if yp == -1:
-            y_pred_clean.append(1 - yt)  # guaranteed wrong
-        else:
-            y_pred_clean.append(yp)
-
-    y_true_arr = np.array(y_true)
-    y_pred_arr = np.array(y_pred_clean)
-
-    metrics = {
-        "accuracy": accuracy_score(y_true_arr, y_pred_arr),
-        "f1": f1_score(y_true_arr, y_pred_arr, zero_division=0),
-        "total": total,
-        "valid_predictions": n_valid,
-        "invalid_predictions": n_invalid,
-    }
-
-
-    return metrics
-
-
-# ── Helper: build model ──────────────────────────────────────────────────────
-def _build_model(backend, model_name, temperature, max_new_tokens=50):
-    """Instantiate the right ModelInterface subclass."""
-    if backend == "api":
-        return LiteLLMModel(
-            model_name=model_name,
-            max_new_tokens=max_new_tokens
-        )
-    elif backend == "local":
-        return HuggingFaceModel(
-            temperature=temperature,
-            model_name=model_name,
-            max_new_tokens=max_new_tokens,
-        )
-    else:
-        raise ValueError(f"Unknown backend: {backend!r}. Use 'api' or 'local'.")
 
 
 # ── Main benchmark runner ────────────────────────────────────────────────────
@@ -188,7 +134,7 @@ def run_benchmark(
 
     # ── 2. Build model ───────────────────────────────────────────────────
     print(f"[*] Initialising model: {model_name}  (backend={backend})")
-    model = _build_model(
+    model = build_model(
         backend=backend,
         model_name=model_name,
         temperature=temperature,
@@ -218,7 +164,7 @@ def run_benchmark(
 
     # ── 4. Evaluate ──────────────────────────────────────────────────────
     print("[*] Computing metrics …")
-    metrics = _compute_metrics(y_true, predictions)
+    metrics = compute_property_predictions(y_true, predictions)
 
     print(f"\n{'═' * 50}")
     print(f"  Dataset : {dataset_name}")

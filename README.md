@@ -62,7 +62,10 @@ Chemberata4_ChemLLMBench/
 ├── .env.example                     # Environment template for API keys & Langfuse
 ├── requirements.txt                 # Python dependencies
 ├── main.py                          # Unified CLI and orchestration entry point
-├── utils.py                         # Model interfaces (LiteLLMModel, HuggingFaceModel)
+├── utils/                           # Shared code: model backends, output parsing, evaluation
+│   ├── backend.py                   # LiteLLMModel / HuggingFaceModel + build_model()
+│   ├── parser.py                    # strip_thinking(), extract_json_answer()
+│   └── metrics.py                   # All evaluation code: one compute_* function per task
 │
 ├── Name_Prediction/                 # Molecular identifier prediction tasks
 │   ├── name_pred.py                 # Runner for SMILES ↔ IUPAC & SMILES ↔ Formula
