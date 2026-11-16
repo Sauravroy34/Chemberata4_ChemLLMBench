@@ -181,7 +181,7 @@ def compute_property_predictions(y_true, y_pred):
 
     return {
         "accuracy": accuracy_score(y_true, y_pred_clean),
-        "f1": f1_score(y_true, y_pred_clean, zero_division=np.nan),
+        "f1": f1_score(y_true, y_pred_clean, average="macro", zero_division=np.nan),
         "total": len(y_true),
         "valid_predictions": len(y_true) - n_invalid,
         "invalid_predictions": n_invalid,
